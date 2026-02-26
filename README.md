@@ -405,21 +405,21 @@ Complete reference of all configurable providers, models, and strategies:
 
 | Category | Option | Alias | Provider | Default Model | API Key | Extra Install |
 |----------|--------|-------|----------|---------------|---------|----------------|
-| **Embedding** | `--embed mistral` | `mistral` | Mistral | `mistral-embed` | `MISTRAL_API_KEY` | `[default]` |
+| **Embedding** | `--embed mistral` | `mistral` | Mistral | `mistral-embed` | `MISTRAL_API_KEY` | — |
 | | `--embed voyage` | `voyage` / `voyageai` | VoyageAI | `voyage-3.5-lite` | `VOYAGE_API_KEY` | `[voyageai]` |
 | | `--embed openai` | `openai` | OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | `[openai]` |
 | | `--embed gemini` | `gemini` | Google | `gemini-embedding-001` | `GEMINI_API_KEY` | `[gemini]` |
-| **LLM** | `--llm mistral` | `mistral` | Mistral | `ministral-3b-2512` | `MISTRAL_API_KEY` | `[default]` |
-| | `--llm mistral-large` | `mistral-large` | Mistral | `mistral-large-2512` | `MISTRAL_API_KEY` | `[default]` |
+| **LLM** | `--llm mistral` | `mistral` | Mistral | `ministral-3b-2512` | `MISTRAL_API_KEY` | — |
+| | `--llm mistral-large` | `mistral-large` | Mistral | `mistral-large-2512` | `MISTRAL_API_KEY` | — |
 | | `--llm claude` | `claude` / `anthropic` | Anthropic | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` | `[anthropic]` |
 | | `--llm gpt-4o` | `openai` | OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
 | | `--llm gemini` | `gemini` | Google | `gemini-2.5-flash` | `GEMINI_API_KEY` | `[gemini]` |
-| **Chunking** | `--chunk basic` | `basic` | Default | — | — | `[default]` |
+| **Chunking** | `--chunk basic` | `basic` | Default | — | — | — |
 | | `--chunk unstructured` | `unstructured` | Unstructured | — | — | `[unstructured]` |
 | **PDF Strategy** | `--pdf-strategy fast` | `fast` | Unstructured | — | — | `[unstructured]` |
 | | `--pdf-strategy hi-res` | `hi-res` | Unstructured | — | — | `[unstructured]` |
 | | `--pdf-strategy auto` | `auto` | Unstructured | — | — | `[unstructured]` |
-| **Database** | `./db` | — | LanceDB (default) | — | — | `[default]` |
+| **Database** | `./db` | — | LanceDB (default) | — | — | — |
 | | `postgres://...` | — | Postgres + pgvector | — | — | `[postgres]` |
 | **Gemini API** | `rag gemini` | — | Gemini File API | — | `GEMINI_API_KEY` | `[gemini]` |
 | **Vertex** | `vertex://PROJECT/CORPUS` | — | Vertex AI RAG Engine | — | GCP auth | `[vertex]` |
