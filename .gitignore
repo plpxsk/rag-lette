@@ -1,5 +1,3 @@
-db
-context
 .env
 
 __pycache__
@@ -7,4 +5,3 @@ __pycache__
 *.ipynb_checkpoints
 
 .DS_Store
-.aider*
