@@ -4,21 +4,20 @@ Chat with your documents. Lightweight RAG CLI with swappable storage and embeddi
 
 ## Install
 
+Install into a venv or similar:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-
-# Default (LanceDB + Mistral):
+# Default (local LanceDB + Mistral embedding & LLM):
 pip install -e ".[default]"
-
-# With Postgres support:
-pip install -e ".[default,postgres]"
 ```
 
-Copy `.env.example` to `.env` and add your API keys:
+Then, copy `.env.example` to `.env` and add your API keys:
 
 ```bash
 MISTRAL_API_KEY=...
 ```
+
+See below for other provider options.
 
 ## Development checks
 
