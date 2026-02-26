@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag"
+version = "0.1.0"
+description = "A lightweight, swappable RAG CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0",
+    "rich>=13.0",
+    "pymupdf4llm>=0.0.17",
+    "pymupdf-layout",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+default      = ["lancedb", "mistralai"]
+lancedb      = ["lancedb"]
+postgres     = ["psycopg2-binary", "pgvector"]
+voyageai     = ["voyageai"]
+mistral      = ["mistralai"]
+anthropic    = ["anthropic"]
+openai       = ["openai"]
+gemini       = ["google-genai>=1.0,<2"]
+vertex       = ["google-cloud-aiplatform"]
+unstructured = ["unstructured[all-docs]"]
+all = [
+    "lancedb",
+    "psycopg2-binary", "pgvector",
+    "voyageai",
+    "mistralai",
+    "anthropic",
+    "openai",
+    "google-genai>=1.0,<2",
+    "google-cloud-aiplatform",
+    "unstructured[all-docs]",
+]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+rag = "rag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false

@@ -1,0 +1,10 @@
+db
+context
+.env
+
+__pycache__
+*.egg-info
+*.ipynb_checkpoints
+
+.DS_Store
+.aider*
