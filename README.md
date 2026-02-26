@@ -4,13 +4,13 @@ Chat with your documents. Lightweight RAG CLI with swappable storage and embeddi
 
 ## Install
 
-Install into a venv or similar:
+Install into a venv or similar. May need to **restart** venv for CLI.
 
 ```bash
 pip install -e .
 ```
 
-This installs the default setup with local LanceDB storage and Mistral for embeddings and LLM.
+This installs the default setup, with local LanceDB storage and Mistral for embeddings and LLM.
 
 Then, copy `.env.example` to `.env` and add your API keys:
 
