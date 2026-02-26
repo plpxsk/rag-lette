@@ -15,10 +15,11 @@ dependencies = [
     "pymupdf4llm>=0.0.17",
     "pymupdf-layout",
     "python-dotenv>=1.0",
+    "lancedb",
+    "mistralai",
 ]
 
 [project.optional-dependencies]
-default      = ["lancedb", "mistralai"]
 lancedb      = ["lancedb"]
 postgres     = ["psycopg2-binary", "pgvector"]
 voyageai     = ["voyageai"]

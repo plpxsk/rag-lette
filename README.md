@@ -7,9 +7,10 @@ Chat with your documents. Lightweight RAG CLI with swappable storage and embeddi
 Install into a venv or similar:
 
 ```bash
-# Default (local LanceDB + Mistral embedding & LLM):
-pip install -e ".[default]"
+pip install -e .
 ```
+
+This installs the default setup with local LanceDB storage and Mistral for embeddings and LLM.
 
 Then, copy `.env.example` to `.env` and add your API keys:
 
@@ -214,7 +215,7 @@ Postgres with [pgvector](https://github.com/pgvector/pgvector) is supported as a
 #### Install extras
 
 ```bash
-pip install -e ".[default,postgres]"
+pip install -e ".[postgres]"
 ```
 
 #### URI format
