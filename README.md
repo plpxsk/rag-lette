@@ -95,6 +95,7 @@ Pass `--embed <provider>` to `ingest` and `ask` (must match):
 | `voyage`   | VoyageAI  | voyage-3.5-lite          | `VOYAGE_API_KEY`    | ✅     |
 | `openai`   | OpenAI    | text-embedding-3-small   | `OPENAI_API_KEY`    | ✅     |
 | `gemini`   | Google    | gemini-embedding-001     | `GEMINI_API_KEY`    | ✅     |
+| `bedrock`  | AWS       | cohere.embed-english-v3      | AWS credentials | ✅     |
 
 You can also specify a model directly: `--embed voyageai/voyage-3.5` or `--embed openai/text-embedding-3-large`
 
@@ -104,6 +105,7 @@ Install the extra for your chosen provider:
 pip install -e ".[voyageai]"   # VoyageAI
 pip install -e ".[openai]"     # OpenAI
 pip install -e ".[gemini]"    # Gemini (embeddings and/or LLM)
+pip install -e ".[bedrock]"   # AWS Bedrock
 ```
 
 > Both `ingest` and `ask` must use the same embedding provider and model — the stored vectors must match the query vector dimensionality.
@@ -118,6 +120,7 @@ Pass `--llm <provider>` to `ask`:
 | `claude`    | claude-haiku-4-5         | `ANTHROPIC_API_KEY`  | ✅     |
 | `openai`    | gpt-4o                   | `OPENAI_API_KEY`     | ✅     |
 | `gemini`    | gemini-2.5-flash         | `GEMINI_API_KEY`     | ✅     |
+| `bedrock`   | amazon.nova-lite-v1:0    | AWS credentials      | ✅     |
 
 Or specify a model directly: `--llm mistral/open-mistral-nemo`
 
@@ -127,6 +130,7 @@ Install the extra for your chosen provider:
 pip install -e ".[anthropic]"  # Claude
 pip install -e ".[openai]"     # OpenAI (also enables OpenAI embeddings)
 pip install -e ".[gemini]"      # Gemini (LLM and/or embeddings)
+pip install -e ".[bedrock]"    # AWS Bedrock
 ```
 
 ### Streaming output
@@ -144,7 +148,7 @@ Use `--no-stream` if you prefer waiting for the full answer rendered as markdown
 rag ask ./db "Summarise the key findings" --no-stream
 ```
 
-Streaming is supported for Mistral, Anthropic, OpenAI, and Gemini.
+Streaming is supported for Mistral, Anthropic, OpenAI, Gemini, and Bedrock.
 
 ## Document chunking
 
@@ -397,6 +401,90 @@ Vertex ingest supports the same basic file types as local ingest (`.pdf`, `.txt`
 
 ---
 
+## AWS Bedrock
+
+Use AWS Bedrock for a fully AWS-native RAG stack: Bedrock for embeddings and generation, LanceDB on S3 for vector storage. No third-party API keys — auth is via the standard AWS credential chain (IAM roles, `~/.aws/credentials`, environment variables, etc.).
+
+### Prerequisites
+
+- AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled for your chosen models
+- AWS credentials configured (IAM role, `aws configure`, or environment variables)
+- Install the extra:
+
+```bash
+pip install -e ".[bedrock]"
+```
+
+No `.env` changes needed — boto3 resolves credentials automatically.
+
+### Usage
+
+```bash
+# Ingest: embed with Titan, store in LanceDB on S3
+rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock
+
+# Ask: embed query with Titan, generate with Nova Lite
+rag ask s3://my-bucket/rag-db "What is AFM?" --embed bedrock --llm bedrock
+```
+
+The `--embed` provider must match between `ingest` and `ask`.
+
+### Embedding models
+
+The default is `amazon.titan-embed-text-v2:0` (1024 dimensions). Two alternatives worth considering:
+
+| Model | Dimensions | Notes |
+|---|---|---|
+| `cohere.embed-english-v3` *(default)* | 1024 | Strong retrieval performance; default for `--embed bedrock` |
+| `amazon.titan-embed-text-v2:0` | 1024 | Good alternative; native AWS model |
+| `amazon.titan-embed-text-v2:0` | 256 | Smaller vectors — lower storage cost and faster search at the cost of some retrieval quality |
+
+Specify a non-default model with provider/model syntax:
+
+```bash
+# Titan v2 (full dimensions)
+rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock/amazon.titan-embed-text-v2:0
+rag ask    s3://my-bucket/rag-db "What is AFM?" --embed bedrock/amazon.titan-embed-text-v2:0 --llm bedrock
+```
+
+> Both `ingest` and `ask` must use the same model — embedding dimensions must match.
+
+### LLM models
+
+The default is `amazon.nova-lite-v1:0`. The Bedrock adapter uses the [Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-call.html), which is model-agnostic — any Converse-compatible model works.
+
+Two good alternatives for this workflow:
+
+| Model | Notes |
+|---|---|
+| `amazon.nova-lite-v1:0` *(default)* | Fast and cost-effective; good for most RAG use cases |
+| `amazon.nova-pro-v1:0` | Higher quality reasoning; better for complex or multi-part questions |
+| `anthropic.claude-sonnet-4-5-20250514-v1:0` | Strong instruction-following and citation quality; good when answer accuracy is the priority |
+
+```bash
+# Nova Pro
+rag ask s3://my-bucket/rag-db "Summarise findings" --llm bedrock/amazon.nova-pro-v1:0
+
+# Claude Sonnet on Bedrock
+rag ask s3://my-bucket/rag-db "Summarise findings" --llm bedrock/anthropic.claude-sonnet-4-5-20250514-v1:0
+```
+
+### Profile example
+
+```toml
+[profiles.aws]
+db    = "s3://my-bucket/rag-db"
+embed = "bedrock"
+llm   = "bedrock"
+```
+
+```bash
+rag ingest --profile aws ./docs/
+rag ask    --profile aws "What is AFM?"
+```
+
+---
+
 ## References
 
 ### Supported Providers Summary
@@ -409,11 +497,13 @@ Complete reference of all configurable providers, models, and strategies:
 | | `--embed voyage` | `voyage` / `voyageai` | VoyageAI | `voyage-3.5-lite` | `VOYAGE_API_KEY` | `[voyageai]` |
 | | `--embed openai` | `openai` | OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | `[openai]` |
 | | `--embed gemini` | `gemini` | Google | `gemini-embedding-001` | `GEMINI_API_KEY` | `[gemini]` |
+| | `--embed bedrock` | `bedrock` | AWS Bedrock | `cohere.embed-english-v3` | AWS credentials | `[bedrock]` |
 | **LLM** | `--llm mistral` | `mistral` | Mistral | `ministral-3b-2512` | `MISTRAL_API_KEY` | — |
 | | `--llm mistral-large` | `mistral-large` | Mistral | `mistral-large-2512` | `MISTRAL_API_KEY` | — |
 | | `--llm claude` | `claude` / `anthropic` | Anthropic | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` | `[anthropic]` |
 | | `--llm gpt-4o` | `openai` | OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
 | | `--llm gemini` | `gemini` | Google | `gemini-2.5-flash` | `GEMINI_API_KEY` | `[gemini]` |
+| | `--llm bedrock` | `bedrock` | AWS Bedrock | `amazon.nova-lite-v1:0` | AWS credentials | `[bedrock]` |
 | **Chunking** | `--chunk basic` | `basic` | Default | — | — | — |
 | | `--chunk unstructured` | `unstructured` | Unstructured | — | — | `[unstructured]` |
 | **PDF Strategy** | `--pdf-strategy fast` | `fast` | Unstructured | — | — | `[unstructured]` |
@@ -423,6 +513,7 @@ Complete reference of all configurable providers, models, and strategies:
 | | `postgres://...` | — | Postgres + pgvector | — | — | `[postgres]` |
 | **Gemini API** | `rag gemini` | — | Gemini File API | — | `GEMINI_API_KEY` | `[gemini]` |
 | **Vertex** | `vertex://PROJECT/CORPUS` | — | Vertex AI RAG Engine | — | GCP auth | `[vertex]` |
+| **AWS Bedrock** | `s3://bucket/path` (DB) | — | LanceDB on S3 | — | AWS credentials | `[bedrock]` |
 
 **Notes:**
 - Custom models can be specified with `provider/model` syntax: `--embed voyageai/voyage-3.5` or `--llm openai/gpt-4-turbo`

@@ -28,6 +28,7 @@ anthropic    = ["anthropic"]
 openai       = ["openai"]
 gemini       = ["google-genai>=1.0,<2"]
 vertex       = ["google-cloud-aiplatform"]
+bedrock      = ["boto3"]
 unstructured = ["unstructured[all-docs]"]
 all = [
     "lancedb",

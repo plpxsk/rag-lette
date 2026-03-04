@@ -19,6 +19,7 @@ LLM_ALIASES: dict[str, tuple[str, str]] = {
     "gpt-4o":         ("openai",    "gpt-4o"),
     "openai":         ("openai",    "gpt-4o"),
     "gemini":         ("google",    "gemini-2.5-flash"),
+    "bedrock":        ("bedrock",   "amazon.nova-lite-v1:0"),
 }
 
 EMBED_ALIASES: dict[str, tuple[str, str]] = {
@@ -27,6 +28,7 @@ EMBED_ALIASES: dict[str, tuple[str, str]] = {
     "voyage":    ("voyageai",  "voyage-3.5-lite"),
     "openai":    ("openai",    "text-embedding-3-small"),
     "gemini":    ("google",    "gemini-embedding-001"),
+    "bedrock":   ("bedrock",  "cohere.embed-english-v3"),
 }
 
 

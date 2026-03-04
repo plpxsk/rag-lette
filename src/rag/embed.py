@@ -152,6 +152,47 @@ class MistralEmbedder(EmbedAdapter):
         return result
 
 
+class BedrockEmbedAdapter(EmbedAdapter):
+    """AWS Bedrock embeddings.  Models: cohere.embed-english-v3, amazon.titan-embed-text-v2:0, ...
+
+    Requires: pip install 'rag[bedrock]'  and standard AWS credential chain.
+    """
+
+    def __init__(self, model: str = "cohere.embed-english-v3") -> None:
+        self.model = model
+
+    @property
+    def dim(self) -> int:
+        return 1024
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        import json
+        try:
+            import boto3
+        except ImportError as exc:
+            raise ImportError(
+                "The 'boto3' package is required for Bedrock embeddings.\n"
+                "Install it with:  pip install \"rag[bedrock]\"\n"
+                f"Original error: {exc}"
+            ) from exc
+        client = boto3.client("bedrock-runtime")
+        result: list[list[float]] = []
+        if self.model.startswith("cohere"):
+            # Cohere batch API: up to 96 texts per call
+            for i in range(0, len(texts), 96):
+                batch = texts[i : i + 96]
+                body = json.dumps({"texts": batch, "input_type": "search_document"})
+                response = client.invoke_model(modelId=self.model, body=body)
+                result.extend(json.loads(response["body"].read())["embeddings"])
+        else:
+            # Titan: one text per call
+            for text in texts:
+                body = json.dumps({"inputText": text})
+                response = client.invoke_model(modelId=self.model, body=body)
+                result.append(json.loads(response["body"].read())["embedding"])
+        return result
+
+
 def get_embed_adapter(provider: str, model: str) -> EmbedAdapter:
     """Instantiate the correct EmbedAdapter from provider + model strings."""
     match provider:
@@ -163,5 +204,7 @@ def get_embed_adapter(provider: str, model: str) -> EmbedAdapter:
             return GeminiEmbedder(model)
         case "mistral":
             return MistralEmbedder(model)
+        case "bedrock":
+            return BedrockEmbedAdapter(model)
         case _:
             raise ValueError(f"Unknown embedding provider: {provider!r}")

@@ -65,6 +65,14 @@ class GoogleLLMAdapter(LLMAdapter):
         yield from _stream_google(prompt, model=self.model, temperature=temperature, max_tokens=max_tokens)
 
 
+class BedrockLLMAdapter(LLMAdapter):
+    def generate(self, prompt: str, *, temperature: float, max_tokens: int) -> str:
+        return _call_bedrock(prompt, model=self.model, temperature=temperature, max_tokens=max_tokens)
+
+    def stream(self, prompt: str, *, temperature: float, max_tokens: int) -> Iterator[str]:
+        yield from _stream_bedrock(prompt, model=self.model, temperature=temperature, max_tokens=max_tokens)
+
+
 def get_llm_adapter(provider: str, model: str) -> LLMAdapter:
     """Instantiate an LLM adapter from provider + model strings."""
     match provider:
@@ -76,6 +84,8 @@ def get_llm_adapter(provider: str, model: str) -> LLMAdapter:
             return OpenAILLMAdapter(model)
         case "google":
             return GoogleLLMAdapter(model)
+        case "bedrock":
+            return BedrockLLMAdapter(model)
         case _:
             raise ValueError(f"Unknown LLM provider: {provider!r}")
 
@@ -257,3 +267,41 @@ def _stream_google(prompt: str, model: str, temperature: float, max_tokens: int)
     ):
         if chunk.text:
             yield chunk.text
+
+
+def _call_bedrock(prompt: str, model: str, temperature: float, max_tokens: int) -> str:
+    try:
+        import boto3
+    except ImportError as exc:
+        raise ImportError(
+            "The 'boto3' package is required for Bedrock LLM.\n"
+            "Install it with:  pip install \"rag[bedrock]\"\n"
+            f"Original error: {exc}"
+        ) from exc
+    client = boto3.client("bedrock-runtime")
+    response = client.converse(
+        modelId=model,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+    )
+    return response["output"]["message"]["content"][0]["text"]
+
+
+def _stream_bedrock(prompt: str, model: str, temperature: float, max_tokens: int) -> Iterator[str]:
+    try:
+        import boto3
+    except ImportError as exc:
+        raise ImportError(
+            "The 'boto3' package is required for Bedrock LLM.\n"
+            "Install it with:  pip install \"rag[bedrock]\"\n"
+            f"Original error: {exc}"
+        ) from exc
+    client = boto3.client("bedrock-runtime")
+    response = client.converse_stream(
+        modelId=model,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+    )
+    for event in response["stream"]:
+        if delta := event.get("contentBlockDelta", {}).get("delta", {}).get("text"):
+            yield delta
