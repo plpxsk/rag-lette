@@ -47,7 +47,8 @@ def _service_progress(event: str, stage: str) -> None:
         "chunking": "Chunking documents...",
         "embedding": "Embedding chunks...",
         "writing": "Writing to database...",
-        "uploading": "Uploading to Vertex AI RAG corpus...",
+        "uploading": "Uploading files...",
+        "indexing": "Waiting for indexing to complete...",
         "searching": "Searching...",
     }
     end_messages = {
@@ -55,6 +56,7 @@ def _service_progress(event: str, stage: str) -> None:
         "embedding": "Embedding complete.",
         "writing": "Write complete.",
         "uploading": "Upload complete.",
+        "indexing": "Indexing complete.",
         "searching": "Search complete.",
     }
     if event == "start":

@@ -193,6 +193,104 @@ def test_ingestion_service_collects_directory_failures(monkeypatch, tmp_path: Pa
     assert result.failures[0][0].name == "bad.txt"
 
 
+def test_ingestion_service_bedrock_kb_emits_upload_and_indexing_progress(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cfg = RagConfig(db="bedrock-kb://MYKB")
+    source_file = tmp_path / "doc.pdf"
+    source_file.write_text("pdf")
+
+    class StubBedrockKbAdapter:
+        def __init__(self) -> None:
+            self.uploaded_rows: list[dict] = []
+            self.indexing_called = False
+
+        def preflight(self) -> None:
+            return
+
+        def exists(self) -> bool:
+            return False
+
+        def has_source(self, source: str) -> bool:
+            return False
+
+        def delete_source(self, source: str) -> None:
+            return
+
+        def setup(self, *, embedding_dim: int) -> None:
+            return
+
+        def add(self, rows: list[dict]) -> None:
+            self.uploaded_rows.extend(rows)
+
+        def wait_for_ingestion(self) -> None:
+            self.indexing_called = True
+
+    adapter = StubBedrockKbAdapter()
+    monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
+
+    events: list[tuple[str, str]] = []
+    result = IngestionService().ingest(
+        cfg,
+        source_file,
+        skip_extensions=set(),
+        overwrite=False,
+        progress=lambda event, stage: events.append((event, stage)),
+    )
+
+    assert result.mode == "bedrock-kb"
+    assert result.rows_written == 1
+    assert adapter.indexing_called
+    assert events == [
+        ("start", "uploading"),
+        ("end", "uploading"),
+        ("start", "indexing"),
+        ("end", "indexing"),
+    ]
+
+
+def test_ingestion_service_bedrock_kb_skips_indexing_without_wait(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cfg = RagConfig(db="bedrock-kb://MYKB")
+    source_file = tmp_path / "doc.pdf"
+    source_file.write_text("pdf")
+
+    class StubBedrockKbAdapterNoWait:
+        def preflight(self) -> None:
+            return
+
+        def exists(self) -> bool:
+            return False
+
+        def has_source(self, source: str) -> bool:
+            return False
+
+        def delete_source(self, source: str) -> None:
+            return
+
+        def setup(self, *, embedding_dim: int) -> None:
+            return
+
+        def add(self, rows: list[dict]) -> None:
+            pass
+
+    adapter = StubBedrockKbAdapterNoWait()
+    monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
+
+    events: list[tuple[str, str]] = []
+    result = IngestionService().ingest(
+        cfg,
+        source_file,
+        skip_extensions=set(),
+        overwrite=False,
+        progress=lambda event, stage: events.append((event, stage)),
+    )
+
+    assert result.rows_written == 1
+    assert events == [("start", "uploading"), ("end", "uploading")]
+
+
 def test_ingestion_service_vertex_upload_emits_progress(monkeypatch, tmp_path: Path) -> None:
     cfg = RagConfig(db="vertex://project/corpus")
     source_file = tmp_path / "doc.pdf"

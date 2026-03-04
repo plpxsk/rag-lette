@@ -558,6 +558,108 @@ class VertexAdapter(DbAdapter):
         self._service.create_or_get_corpus(self._corpus_display_name)
 
 
+def _bedrock_kb_parse_uri(uri: str) -> tuple[str, str | None]:
+    """Parse bedrock-kb://KB_ID or bedrock-kb://KB_ID/DS_ID into (kb_id, ds_id | None)."""
+    if not uri.startswith("bedrock-kb://"):
+        raise ValueError(f"Invalid Bedrock KB URI: {uri!r}")
+    rest = uri.removeprefix("bedrock-kb://").strip("/")
+    if not rest:
+        raise ValueError(f"Bedrock KB URI must include a Knowledge Base ID, got {uri!r}")
+    if "/" in rest:
+        kb_id, _, ds_id = rest.partition("/")
+        return kb_id.strip(), ds_id.strip() or None
+    return rest.strip(), None
+
+
+class BedrockKbAdapter(DbAdapter):
+    """Amazon Bedrock Knowledge Bases.  URI: bedrock-kb://KB_ID  or  bedrock-kb://KB_ID/DS_ID
+
+    Ingest: uploads local files to S3 and triggers KB ingestion; AWS handles chunking and embedding.
+    Ask: retrieves by question text (use query_by_text), then generate with Bedrock LLM.
+    Requires: pip install 'rag[bedrock]', AWS credentials, and a Knowledge Base in AWS Console.
+    """
+
+    def __init__(self, uri: str, table_name: str) -> None:
+        self.uri = uri
+        self.table_name = table_name
+        self._kb_id, self._ds_id = _bedrock_kb_parse_uri(uri)
+        from rag.bedrock_kb import BedrockKbService
+        self._service = BedrockKbService(knowledge_base_id=self._kb_id)
+        self._last_job_id: str | None = None
+
+    def setup(self, *, embedding_dim: int) -> None:
+        pass
+
+    def add(self, rows: Sequence[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        if "path" not in rows[0]:
+            raise NotImplementedError(
+                "Bedrock KB adapter expects rows with 'path' and 'source' (file paths); "
+                "use bedrock-kb:// ingest path in CLI."
+            )
+        paths = [Path(r["path"]) for r in rows if r.get("path")]
+        self._last_job_id = self._service.upload_files(paths, self._ds_id)
+
+    def wait_for_ingestion(self) -> None:
+        """Block until the KB ingestion job completes."""
+        if self._last_job_id:
+            self._service.wait_for_ingestion(self._last_job_id, self._ds_id)
+
+    def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
+        raise NotImplementedError(
+            "Bedrock KB retrieves by text; use query_by_text(question, k) from the CLI."
+        )
+
+    def query_by_text(self, query_text: str, k: int) -> list[str]:
+        """Retrieve top-k chunks by question text (Bedrock KB uses semantic search by text)."""
+        return self._service.retrieval_query(query_text, top_k=k)
+
+    def info(self) -> dict[str, Any]:
+        return {
+            "backend": "bedrock-kb",
+            "uri": self.uri,
+            "table": self.table_name,
+            "knowledge_base_id": self._kb_id,
+            "data_source_id": self._ds_id,
+        }
+
+    def exists(self) -> bool:
+        try:
+            keys = self._service.list_s3_objects(self._ds_id)
+            return len(keys) > 0
+        except Exception:
+            return False
+
+    def has_source(self, source: str) -> bool:
+        try:
+            return self._service.s3_object_exists(source, self._ds_id)
+        except Exception:
+            return False
+
+    def delete_source(self, source: str) -> None:
+        try:
+            self._service.delete_s3_object(source, self._ds_id)
+        except Exception:
+            pass
+
+    def list_sources(self) -> list[str]:
+        try:
+            return sorted(self._service.list_s3_objects(self._ds_id))
+        except Exception:
+            return []
+
+    def preflight(self) -> None:
+        try:
+            self._service.get_knowledge_base()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot access Bedrock Knowledge Base {self._kb_id!r}.\n"
+                f"Check that the KB exists and AWS credentials have bedrock:GetKnowledgeBase permission.\n"
+                f"Error: {exc}"
+            ) from exc
+
+
 def get_db_adapter(uri: str, table_name: str) -> DbAdapter:
     """Instantiate the correct DbAdapter from a URI string."""
     if uri.startswith(("postgres://", "postgresql://")):
@@ -566,4 +668,6 @@ def get_db_adapter(uri: str, table_name: str) -> DbAdapter:
         return SqliteAdapter(uri, table_name)
     if uri.startswith("vertex://"):
         return VertexAdapter(uri, table_name)
+    if uri.startswith("bedrock-kb://"):
+        return BedrockKbAdapter(uri, table_name)
     return LanceDbAdapter(uri, table_name)

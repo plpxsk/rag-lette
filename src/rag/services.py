@@ -10,7 +10,7 @@ from rag.config import RagConfig
 from rag.db import get_db_adapter
 from rag.embed import get_embed_adapter
 
-ProgressStage = Literal["chunking", "embedding", "writing", "uploading", "searching"]
+ProgressStage = Literal["chunking", "embedding", "writing", "uploading", "indexing", "searching"]
 ProgressEvent = Literal["start", "end"]
 
 
@@ -44,9 +44,9 @@ class IngestionService:
         adapter.preflight()
 
         db_existed = adapter.exists()
-        is_vertex = cfg.db.startswith("vertex://")
-        if is_vertex:
-            return self._ingest_vertex(
+        is_managed = cfg.db.startswith(("vertex://", "bedrock-kb://"))
+        if is_managed:
+            return self._ingest_managed(
                 cfg,
                 source_path,
                 skip_extensions=skip_extensions,
@@ -63,7 +63,7 @@ class IngestionService:
             progress=progress,
         )
 
-    def _ingest_vertex(
+    def _ingest_managed(
         self,
         cfg: RagConfig,
         source_path: Path,
@@ -74,6 +74,7 @@ class IngestionService:
         progress: ProgressCallback | None,
     ) -> IngestionResult:
         adapter = get_db_adapter(cfg.db, cfg.table)
+        mode = "bedrock-kb" if cfg.db.startswith("bedrock-kb://") else "vertex"
         normalized_skip = {
             ext.lower() if ext.startswith(".") else f".{ext.lower()}"
             for ext in skip_extensions
@@ -102,7 +103,7 @@ class IngestionService:
         else:
             if source_path.suffix.lower() not in BASIC_EXTENSIONS:
                 raise RuntimeError(
-                    f"Vertex ingest supports .pdf, .txt, .md; got {source_path.suffix!r}"
+                    f"Managed ingest supports .pdf, .txt, .md; got {source_path.suffix!r}"
                 )
             if db_existed and adapter.has_source(source_path.name):
                 if overwrite:
@@ -115,7 +116,7 @@ class IngestionService:
 
         if not files_to_process:
             return IngestionResult(
-                mode="vertex",
+                mode=mode,
                 db_existed=db_existed,
                 chunks=[],
                 rows_written=0,
@@ -128,8 +129,14 @@ class IngestionService:
         rows = [{"path": str(path.resolve()), "source": path.name} for path in files_to_process]
         adapter.add(rows)
         self._emit(progress, "end", "uploading")
+
+        if hasattr(adapter, "wait_for_ingestion"):
+            self._emit(progress, "start", "indexing")
+            adapter.wait_for_ingestion()
+            self._emit(progress, "end", "indexing")
+
         return IngestionResult(
-            mode="vertex",
+            mode=mode,
             db_existed=db_existed,
             chunks=[],
             rows_written=len(rows),

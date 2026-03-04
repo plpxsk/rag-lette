@@ -8,7 +8,7 @@ Mix and match embeddings, LLMs, and storage — all from the CLI, no code requir
 
 - **Embeddings:** Mistral · VoyageAI · OpenAI · Gemini · AWS Bedrock
 - **LLMs:** Mistral · Claude · GPT-4o · Gemini · AWS Bedrock
-- **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine
+- **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine · Bedrock Knowledge Bases
 - **Parsing:** PDF, DOCX, PPTX, XLSX, and more via `basic` or `unstructured` chunkers
 
 ## Install
@@ -419,24 +419,80 @@ Vertex ingest supports the same basic file types as local ingest (`.pdf`, `.txt`
 
 ## AWS Bedrock
 
-Use AWS Bedrock for a fully AWS-native RAG stack: Bedrock for embeddings and generation, LanceDB on S3 for vector storage. No third-party API keys — auth is via the standard AWS credential chain (IAM roles, `~/.aws/credentials`, environment variables, etc.).
+Use AWS Bedrock for a fully AWS-native RAG stack. Two modes are available:
 
-> **Note:** Chunking is still performed locally by rag-lette (`--chunk basic` or `--chunk unstructured`). For a fully end-to-end AWS-managed pipeline — where AWS handles chunking, embedding, and retrieval — [Amazon Bedrock Knowledge Bases](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base.html) is the native option (not yet implemented).
+1. **Bedrock Knowledge Bases (fully managed)** — AWS handles chunking, embedding, and retrieval; you connect rag-lette to an existing KB
+2. **Bedrock with LanceDB on S3 (manual)** — chunking runs locally, vectors stored in LanceDB on S3; you control the embedding model
 
-### Prerequisites
+No third-party API keys needed — auth is via the standard AWS credential chain (IAM roles, `~/.aws/credentials`, environment variables, etc.).
 
-- AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled for your chosen models
-  - add `AmazonBedrockFullAccess` to IAM policy
-- AWS credentials configured via `aws configure`,  environment variables, etc
+### Bedrock Knowledge Bases (fully managed)
+
+Amazon Bedrock Knowledge Bases is the native AWS managed RAG service. Create a Knowledge Base in the AWS Console (the wizard provisions the IAM role, OpenSearch Serverless collection, and S3 data source), then point rag-lette at it. AWS handles chunking, embedding, and retrieval.
+
+#### Prerequisites
+
+- AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled
+- A Knowledge Base created in the [AWS Console](https://console.aws.amazon.com/bedrock/) (use the wizard — it provisions IAM role, OpenSearch Serverless, and S3 data source automatically)
+- IAM user/role with `AmazonBedrockFullAccess` and S3 read/write on the KB's data source bucket
 - Install the extras:
 
 ```bash
 pip install -e ".[bedrock]"
 ```
 
-No `.env` changes needed — boto3 resolves credentials automatically.
+#### URI format
 
-### Usage
+```
+bedrock-kb://KNOWLEDGE_BASE_ID
+bedrock-kb://KNOWLEDGE_BASE_ID/DATA_SOURCE_ID   # specify data source explicitly
+```
+
+The Knowledge Base ID is shown on the KB overview page in the AWS Console (e.g. `ABCDE12345`).
+
+#### Usage
+
+```bash
+# Ingest: uploads files to KB's S3 bucket, triggers ingestion job, waits for indexing
+rag ingest bedrock-kb://ABCDE12345 ./docs/
+
+# Ask: retrieves via KB Retrieve API, generates with Bedrock LLM
+rag ask bedrock-kb://ABCDE12345 "What is AFM?" --llm bedrock
+```
+
+No `--embed` flag needed — the KB uses the embedding model configured at creation time.
+
+#### Profile example
+
+```toml
+[profiles.aws-kb]
+db  = "bedrock-kb://ABCDE12345"
+llm = "bedrock"
+```
+
+```bash
+rag ingest --profile aws-kb ./docs/
+rag ask    --profile aws-kb "What is AFM?"
+```
+
+---
+
+### Bedrock with LanceDB on S3 (manual)
+
+Use Bedrock embeddings and generation with LanceDB on S3 for vector storage. Chunking runs locally.
+
+#### Prerequisites
+
+- AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled
+  - Add `AmazonBedrockFullAccess` to IAM policy
+- AWS credentials configured via `aws configure`, environment variables, etc.
+- Install the extras:
+
+```bash
+pip install -e ".[bedrock]"
+```
+
+#### Usage
 
 ```bash
 # Ingest: embed with Bedrock model, store in LanceDB on S3
@@ -448,47 +504,33 @@ rag ask s3://my-bucket/rag-db "What is AFM?" --embed bedrock --llm bedrock
 
 The `--embed` provider must match between `ingest` and `ask`.
 
-### Embedding models
-
-The default is `amazon.titan-embed-text-v2:0` (1024 dimensions). Two alternatives worth considering:
+#### Embedding models
 
 | Model | Dimensions | Notes |
 |---|---|---|
-| `cohere.embed-english-v3` *(default)* | 1024 | Strong retrieval performance; default for `--embed bedrock` |
+| `cohere.embed-english-v3` *(default)* | 1024 | Strong retrieval performance |
 | `amazon.titan-embed-text-v2:0` | 1024 | Good alternative; native AWS model |
-| `amazon.titan-embed-text-v2:0` | 256 | Smaller vectors — lower storage cost and faster search at the cost of some retrieval quality |
-
-Specify a non-default model with provider/model syntax:
 
 ```bash
-# Titan v2 (full dimensions)
 rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock/amazon.titan-embed-text-v2:0
 rag ask    s3://my-bucket/rag-db "What is AFM?" --embed bedrock/amazon.titan-embed-text-v2:0 --llm bedrock
 ```
 
-> Both `ingest` and `ask` must use the same model — embedding dimensions must match.
+#### LLM models
 
-### LLM models
-
-The default is `amazon.nova-lite-v1:0`. The Bedrock adapter uses the [Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-call.html), which is model-agnostic — any Converse-compatible model works.
-
-Two good alternatives for this workflow:
+The default is `amazon.nova-lite-v1:0`. The Bedrock adapter uses the [Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-call.html) — any Converse-compatible model works.
 
 | Model | Notes |
 |---|---|
-| `amazon.nova-lite-v1:0` *(default)* | Fast and cost-effective; good for most RAG use cases |
-| `amazon.nova-pro-v1:0` | Higher quality reasoning; better for complex or multi-part questions |
-| `anthropic.claude-sonnet-4-5-20250514-v1:0` | Strong instruction-following and citation quality; good when answer accuracy is the priority |
+| `amazon.nova-lite-v1:0` *(default)* | Fast and cost-effective |
+| `amazon.nova-pro-v1:0` | Higher quality reasoning |
+| `anthropic.claude-sonnet-4-5-20250514-v1:0` | Strong instruction-following and citation quality |
 
 ```bash
-# Nova Pro
 rag ask s3://my-bucket/rag-db "Summarise findings" --llm bedrock/amazon.nova-pro-v1:0
-
-# Claude Sonnet on Bedrock
-rag ask s3://my-bucket/rag-db "Summarise findings" --llm bedrock/anthropic.claude-sonnet-4-5-20250514-v1:0
 ```
 
-### Profile example
+#### Profile example
 
 ```toml
 [profiles.aws]
@@ -532,6 +574,7 @@ Complete reference of all configurable providers, models, and strategies:
 | | `postgres://...` | — | Postgres + pgvector | — | — | `[postgres]` |
 | **Gemini API** | `rag gemini` | — | Gemini File API | — | `GEMINI_API_KEY` | `[gemini]` |
 | **Vertex** | `vertex://PROJECT/CORPUS` | — | Vertex AI RAG Engine | — | GCP auth | `[vertex]` |
+| **Bedrock KB** | `bedrock-kb://KB_ID` | — | Bedrock Knowledge Bases | — | AWS credentials | `[bedrock]` |
 | **AWS Bedrock** | `s3://bucket/path` (DB) | — | LanceDB on S3 | — | AWS credentials | `[bedrock]` |
 
 **Notes:**
