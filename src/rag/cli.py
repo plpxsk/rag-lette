@@ -1,6 +1,7 @@
 """CLI entry point: `rag ingest` and `rag ask`."""
 from __future__ import annotations
 
+import difflib
 import logging
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
-from rag.config import load_config
+from rag.config import EMBED_ALIASES, LLM_ALIASES, load_config
 from rag.gemini import GeminiFileApiClient
 from rag.generate import generate, generate_stream
 from rag.services import IngestionService, QueryService
@@ -17,6 +18,18 @@ from rag.services import IngestionService, QueryService
 console = Console()
 ingestion_service = IngestionService()
 query_service = QueryService()
+
+
+def _fuzzy_option(value: str, known: list[str], label: str) -> str:
+    """Validate value against known aliases; suggest close matches on typo."""
+    if value in known:
+        return value
+    provider = value.split("/")[0]
+    if provider in known:
+        return value
+    matches = difflib.get_close_matches(provider, known, n=1, cutoff=0.6)
+    hint = f" Did you mean '{matches[0]}'?" if matches else f" Valid options: {', '.join(known)}."
+    raise click.BadParameter(f"'{value}' is not a known {label}.{hint}", param_hint=f"--{label}")
 
 
 def _service_progress(event: str, stage: str) -> None:
@@ -137,6 +150,7 @@ def ingest(
       rag ingest ./db paper.pdf --embed mistral --chunk-size 800
       rag ingest ./db paper.pdf --overwrite
     """
+    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
     cfg = load_config(profile=profile, overrides={
         "db": db, "table": table, "embed": embed,
         "chunk_method": chunk_method, "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
@@ -224,6 +238,8 @@ def ask(
       rag ask ./db "What is AFM?" --llm mistral --top-k 8 --context
       rag ask ./db "What is AFM?" --stream
     """
+    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
+    llm = _fuzzy_option(llm, list(LLM_ALIASES), "llm")
     cfg = load_config(profile=profile, overrides={
         "db": db, "table": table, "embed": embed, "llm": llm,
         "top_k": top_k, "max_tokens": max_tokens,
