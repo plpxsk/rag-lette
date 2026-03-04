@@ -1,6 +1,15 @@
-# rag-lette
+# RAG Lette: Chat with your Documents
 
-Chat with your documents. Lightweight RAG CLI with swappable storage and embedding backends.
+Lightweight RAG CLI with swappable storage and embedding backends.
+
+## Highlights
+
+Mix and match embeddings, LLMs, and storage — all from the CLI, no code required.
+
+- **Embeddings:** Mistral · VoyageAI · OpenAI · Gemini · AWS Bedrock
+- **LLMs:** Mistral · Claude · GPT-4o · Gemini · AWS Bedrock
+- **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine
+- **Parsing:** PDF, DOCX, PPTX, XLSX, and more via `basic` or `unstructured` chunkers
 
 ## Install
 
