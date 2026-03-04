@@ -405,6 +405,8 @@ Vertex ingest supports the same basic file types as local ingest (`.pdf`, `.txt`
 
 Use AWS Bedrock for a fully AWS-native RAG stack: Bedrock for embeddings and generation, LanceDB on S3 for vector storage. No third-party API keys — auth is via the standard AWS credential chain (IAM roles, `~/.aws/credentials`, environment variables, etc.).
 
+> **Note:** Chunking is still performed locally by rag-lette (`--chunk basic` or `--chunk unstructured`). For a fully end-to-end AWS-managed pipeline — where AWS handles chunking, embedding, and retrieval — [Amazon Bedrock Knowledge Bases](https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base.html) is the native option (not yet implemented).
+
 ### Prerequisites
 
 - AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled for your chosen models
