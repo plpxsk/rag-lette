@@ -169,12 +169,17 @@ def ingest(
             progress=_service_progress,
         )
     except RuntimeError as exc:
-        raise click.ClickException(str(exc))
+        msg = str(exc)
+        if "Unsupported file type" in msg:
+            raise click.ClickException(msg + "\nTip: use --chunk unstructured for .docx, .pptx, .xlsx and other Office formats.")
+        raise click.ClickException(msg)
 
     for source in result.skipped_files:
         console.print(f"[dim]  skipping {source} (already ingested)[/dim]")
     for file_path, exc in result.failures:
-        console.print(f"[yellow]  skipped {file_path.name}: {exc}[/yellow]")
+        msg = str(exc)
+        hint = "\n  Tip: use --chunk unstructured for .docx, .pptx, .xlsx and other Office formats." if "Unsupported file type" in msg else ""
+        console.print(f"[yellow]  skipped {file_path.name}: {msg}{hint}[/yellow]")
 
     if result.rows_written == 0:
         console.print("[yellow]All files already ingested — nothing to do.[/yellow]")
