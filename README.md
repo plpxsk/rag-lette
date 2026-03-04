@@ -51,6 +51,13 @@ rag ingest ./db ./docs/
 rag ingest ./db paper.pdf --embed mistral --chunk-size 800
 ```
 
+**List** ingested files:
+
+```bash
+rag list ./db
+rag list s3://my-bucket/rag-db
+```
+
 **Ask** a question:
 
 ```bash

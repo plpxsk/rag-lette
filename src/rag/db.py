@@ -47,6 +47,10 @@ class DbAdapter(ABC):
     def delete_source(self, source: str) -> None:
         """Delete all rows with the given source filename."""
 
+    @abstractmethod
+    def list_sources(self) -> list[str]:
+        """Return a sorted list of distinct source filenames stored in the DB."""
+
     def preflight(self) -> None:
         """Validate connectivity and write permissions before expensive work.
 
@@ -111,6 +115,14 @@ class LanceDbAdapter(DbAdapter):
         table = db.open_table(self.table_name)
         safe = source.replace("'", "''")
         table.delete(f"source = '{safe}'")
+
+    def list_sources(self) -> list[str]:
+        if not self.exists():
+            return []
+        db = self._connect()
+        table = db.open_table(self.table_name)
+        rows = table.search().select(["source"]).to_list()
+        return sorted({r["source"] for r in rows if r.get("source")})
 
 
 def _pg_parse_uri(uri: str) -> dict[str, Any]:
@@ -390,6 +402,22 @@ class PostgresAdapter(DbAdapter):
         finally:
             conn.close()
 
+    def list_sources(self) -> list[str]:
+        if not self.exists():
+            return []
+        from psycopg2 import sql as pgsql
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    pgsql.SQL(
+                        "SELECT DISTINCT source FROM {} WHERE source IS NOT NULL ORDER BY source"
+                    ).format(pgsql.Identifier(self.table_name))
+                )
+                return [r[0] for r in cur.fetchall()]
+        finally:
+            conn.close()
+
 
 class SqliteAdapter(DbAdapter):
     """SQLite vector store.  URI: sqlite:///path/to/db"""
@@ -417,6 +445,9 @@ class SqliteAdapter(DbAdapter):
         raise NotImplementedError("SQLite backend not yet implemented")
 
     def delete_source(self, source: str) -> None:
+        raise NotImplementedError("SQLite backend not yet implemented")
+
+    def list_sources(self) -> list[str]:
         raise NotImplementedError("SQLite backend not yet implemented")
 
 
@@ -515,6 +546,13 @@ class VertexAdapter(DbAdapter):
             if display_name == source:
                 self._service.delete_file(full_name)
                 return
+
+    def list_sources(self) -> list[str]:
+        corpus = self._corpus_name or self._service.get_corpus_by_display_name(self._corpus_display_name)
+        if corpus is None:
+            return []
+        self._corpus_name = corpus
+        return sorted(display_name for display_name, _ in self._service.list_files(corpus))
 
     def preflight(self) -> None:
         self._service.create_or_get_corpus(self._corpus_display_name)

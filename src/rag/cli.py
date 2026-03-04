@@ -20,6 +20,16 @@ ingestion_service = IngestionService()
 query_service = QueryService()
 
 
+def _infer_embed_from_llm(llm_alias: str) -> str:
+    """Pick an embed alias whose provider matches the LLM provider, or fall back to mistral."""
+    base = llm_alias.split("/")[0]
+    llm_provider = LLM_ALIASES.get(base, ("mistral", ""))[0]
+    for embed_alias, (embed_provider, _) in EMBED_ALIASES.items():
+        if embed_provider == llm_provider:
+            return embed_alias
+    return "mistral"
+
+
 def _fuzzy_option(value: str, known: list[str], label: str) -> str:
     """Validate value against known aliases; suggest close matches on typo."""
     if value in known:
@@ -206,7 +216,7 @@ def ingest(
 @click.argument("db")
 @click.argument("question")
 @click.option("--table", default="embeddings", show_default=True)
-@click.option("--embed", default="mistral", show_default=True)
+@click.option("--embed", default=None, help="Embedding provider/model. Defaults to match --llm when possible.")
 @click.option("--llm", default="mistral", show_default=True, help="LLM provider/model (e.g. mistral, mistral-large, claude).")
 @click.option("--top-k", default=5, show_default=True, help="Number of chunks to retrieve.")
 @click.option("--max-tokens", default=4096, show_default=True, help="Max tokens in the LLM response (increase if answers are cut off).")
@@ -243,8 +253,10 @@ def ask(
       rag ask ./db "What is AFM?" --llm mistral --top-k 8 --context
       rag ask ./db "What is AFM?" --stream
     """
-    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
     llm = _fuzzy_option(llm, list(LLM_ALIASES), "llm")
+    if embed is None:
+        embed = _infer_embed_from_llm(llm)
+    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
     cfg = load_config(profile=profile, overrides={
         "db": db, "table": table, "embed": embed, "llm": llm,
         "top_k": top_k, "max_tokens": max_tokens,
@@ -255,8 +267,15 @@ def ask(
 
     try:
         retrieved = query_service.retrieve(cfg, question, progress=_service_progress)
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc))
+    except Exception as exc:
+        msg = str(exc)
+        if "query dim" in msg and "doesn't match" in msg:
+            raise click.ClickException(
+                f"{msg}\nHint: make sure --embed matches the model used at ingest time."
+            )
+        if isinstance(exc, RuntimeError):
+            raise click.ClickException(msg)
+        raise
 
     if show_context and retrieved:
         console.print(Rule("Retrieved context"))
@@ -289,6 +308,35 @@ def ask(
                 max_tokens=cfg.max_tokens,
             )
         console.print(Markdown(answer))
+
+
+@main.command("list")
+@click.argument("db")
+@click.option("--table", default="embeddings", show_default=True, help="Table name in the DB.")
+@click.option("--profile", default=None, help="Config profile from rag.toml to use.")
+@click.pass_context
+def list_cmd(ctx: click.Context, db: str, table: str, profile: str | None) -> None:
+    """List files ingested into DB.
+
+    \b
+    Examples:
+      rag list ./db
+      rag list s3://my-bucket/rag-db
+      rag list postgres://user:pass@localhost/ragdb
+    """
+    from rag.config import load_config
+    from rag.db import get_db_adapter
+    cfg = load_config(profile=profile, overrides={"db": db, "table": table})
+    adapter = get_db_adapter(cfg.db, cfg.table)
+    try:
+        sources = adapter.list_sources()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+    if not sources:
+        console.print("[dim]No files ingested yet.[/dim]")
+        return
+    for source in sources:
+        console.print(source)
 
 
 @main.command("gemini")
