@@ -155,10 +155,11 @@ class IngestionService:
         if source_path.is_dir():
             all_files = list_chunkable_files(source_path, cfg.chunk_method, skip_extensions)
             files_to_process: list[Path] = []
+            to_overwrite: set[str] = set()
             for file_path in all_files:
                 if db_existed and adapter.has_source(file_path.name):
                     if overwrite:
-                        adapter.delete_source(file_path.name)
+                        to_overwrite.add(file_path.name)
                         files_to_process.append(file_path)
                     else:
                         skipped_files.append(file_path.name)
@@ -175,35 +176,35 @@ class IngestionService:
                     failures=[],
                 )
 
+            # Chunk first; only delete existing records for files that chunk successfully
             self._emit(progress, "start", "chunking")
             for file_path in files_to_process:
                 try:
-                    chunks.extend(
-                        chunk_file(
-                            file_path,
-                            chunk_size=cfg.chunk_size,
-                            overlap=cfg.chunk_overlap,
-                            chunk_method=cfg.chunk_method,
-                            pdf_strategy=cfg.pdf_strategy,
-                        )
+                    file_chunks = chunk_file(
+                        file_path,
+                        chunk_size=cfg.chunk_size,
+                        overlap=cfg.chunk_overlap,
+                        chunk_method=cfg.chunk_method,
+                        pdf_strategy=cfg.pdf_strategy,
                     )
+                    if file_path.name in to_overwrite:
+                        adapter.delete_source(file_path.name)
+                    chunks.extend(file_chunks)
                 except Exception as exc:
                     failures.append((file_path, exc))
             self._emit(progress, "end", "chunking")
         else:
-            if db_existed and adapter.has_source(source_path.name):
-                if overwrite:
-                    adapter.delete_source(source_path.name)
-                else:
-                    skipped_files.append(source_path.name)
-                    return IngestionResult(
-                        mode="vector",
-                        db_existed=db_existed,
-                        chunks=[],
-                        rows_written=0,
-                        skipped_files=skipped_files,
-                        failures=[],
-                    )
+            already_exists = db_existed and adapter.has_source(source_path.name)
+            if already_exists and not overwrite:
+                skipped_files.append(source_path.name)
+                return IngestionResult(
+                    mode="vector",
+                    db_existed=db_existed,
+                    chunks=[],
+                    rows_written=0,
+                    skipped_files=skipped_files,
+                    failures=[],
+                )
 
             try:
                 self._emit(progress, "start", "chunking")
@@ -217,6 +218,10 @@ class IngestionService:
                 self._emit(progress, "end", "chunking")
             except Exception as exc:
                 raise RuntimeError(f"Failed to chunk {source_path.name}: {exc}") from exc
+
+            # Delete only after successful chunk so a failed re-ingest preserves old records
+            if already_exists:
+                adapter.delete_source(source_path.name)
 
         if not chunks:
             raise RuntimeError("No chunks extracted — nothing to ingest.")
