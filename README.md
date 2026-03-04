@@ -410,8 +410,9 @@ Use AWS Bedrock for a fully AWS-native RAG stack: Bedrock for embeddings and gen
 ### Prerequisites
 
 - AWS account with [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) enabled for your chosen models
-- AWS credentials configured (IAM role, `aws configure`, or environment variables)
-- Install the extra:
+  - add `AmazonBedrockFullAccess` to IAM policy
+- AWS credentials configured via `aws configure`,  environment variables, etc
+- Install the extras:
 
 ```bash
 pip install -e ".[bedrock]"
@@ -422,10 +423,10 @@ No `.env` changes needed — boto3 resolves credentials automatically.
 ### Usage
 
 ```bash
-# Ingest: embed with Titan, store in LanceDB on S3
+# Ingest: embed with Bedrock model, store in LanceDB on S3
 rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock
 
-# Ask: embed query with Titan, generate with Nova Lite
+# Ask: embed query and use LLM, all from Bedrock
 rag ask s3://my-bucket/rag-db "What is AFM?" --embed bedrock --llm bedrock
 ```
 
