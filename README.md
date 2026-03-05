@@ -11,6 +11,20 @@ Mix and match embeddings, LLMs, and storage — all from the CLI, no code requir
 - **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine · Bedrock Knowledge Bases
 - **Parsing:** PDF, DOCX, PPTX, XLSX, and more via `basic` or `unstructured` chunkers
 
+## How it works
+
+**Ingest flow:**
+```
+Documents → Chunking → Embedding → Storage (vector DB)
+```
+
+**Answer flow:**
+```
+Question → Embedding → Semantic search → Retrieved chunks → LLM generation → Answer
+```
+
+Each step uses swappable providers — choose your embeddings, LLM, and storage backend independently.
+
 ## Install
 
 Install into a venv or similar. May need to **restart** venv for CLI.
@@ -62,7 +76,7 @@ rag list s3://my-bucket/rag-db
 
 ```bash
 rag ask ./db "What are the responsible AI principles?"
-rag ask ./db "What is AFM?" --llm claude --top-k 8 --context
+rag -v ask ./db "What is AFM?" --llm claude --top-k 8 --context
 ```
 
 **Shorthand** — ask against `./db` without subcommands:
