@@ -8,8 +8,11 @@ chunk_method controls both extraction and splitting strategy:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
+
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 
 BASIC_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".txt", ".md"})
 
@@ -33,6 +36,7 @@ SUPPORTED_EXTENSIONS = BASIC_EXTENSIONS
 class Chunk:
     text: str
     source: str  # filename
+    heading: str = field(default="")
 
 
 def chunk_file(
@@ -54,7 +58,7 @@ def chunk_file(
     else:
         raise ValueError(f"Unsupported file type: {path.suffix!r} ({path.name})")
 
-    return [Chunk(text=c, source=path.name) for c in _split_text(text, chunk_size, overlap)]
+    return _chunk_basic(text, chunk_size, overlap, path.name)
 
 
 def list_chunkable_files(
@@ -168,6 +172,43 @@ def _chunk_file_unstructured(
         for el in chunked
         if (text := str(el).strip())
     ]
+
+
+def _split_by_headings(text: str) -> list[tuple[str, str]]:
+    """Split markdown text into (heading, section_text) pairs at heading boundaries."""
+    matches = list(_MD_HEADING.finditer(text))
+    if not matches:
+        return [("", text)]
+    sections = []
+    for idx, m in enumerate(matches):
+        heading = m.group(2).strip()
+        start = m.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        sections.append((heading, text[start:end]))
+    return sections
+
+
+def _chunk_basic(text: str, chunk_size: int, overlap: int, source: str) -> list[Chunk]:
+    """Heading-aware chunking: split at markdown headings, then recursively split each
+    section, then merge any trailing tiny chunks into the preceding chunk."""
+    MIN_CHUNK_CHARS = 100
+    raw: list[Chunk] = []
+    for heading, sec_text in _split_by_headings(text):
+        for piece in _split_text(sec_text, chunk_size, overlap):
+            raw.append(Chunk(text=piece, source=source, heading=heading))
+
+    merged: list[Chunk] = []
+    for ch in raw:
+        if merged and len(ch.text) < MIN_CHUNK_CHARS:
+            prev = merged[-1]
+            merged[-1] = Chunk(
+                text=(prev.text + "\n\n" + ch.text).strip(),
+                source=prev.source,
+                heading=prev.heading or ch.heading,
+            )
+        else:
+            merged.append(ch)
+    return merged
 
 
 def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
