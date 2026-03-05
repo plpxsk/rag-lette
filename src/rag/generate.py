@@ -123,15 +123,13 @@ def generate_stream(
 
 
 def _build_prompt(query: str, context: list[str]) -> str:
-    ctx = "\n\n---\n\n".join(context)
+    ctx = "\n\n".join(f"<chunk_{i+1}>\n{c}\n</chunk_{i+1}>" for i, c in enumerate(context))
     return (
-        "Context information is below.\n"
-        "---------------------\n"
-        f"{ctx}\n"
-        "---------------------\n"
-        "Given the context information and not prior knowledge, answer the query.\n"
-        f"Query: {query}\n"
-        "Answer:"
+        "Answer the query using only the context provided below. "
+        "Quote relevant passages to support your answer. "
+        "If the context does not contain enough information, say so.\n\n"
+        f"<context>\n{ctx}\n</context>\n\n"
+        f"<query>{query}</query>"
     )
 
 
