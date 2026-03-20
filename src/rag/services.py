@@ -238,6 +238,11 @@ class IngestionService:
         vectors = embedder.embed([chunk.text for chunk in chunks])
         self._emit(progress, "end", "embedding")
 
+        if len(vectors) != len(chunks):
+            raise RuntimeError(
+                "Embedding adapter returned a different number of vectors than chunks."
+            )
+
         self._emit(progress, "start", "writing")
         adapter.setup(embedding_dim=embedder.dim)
         rows = [

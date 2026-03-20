@@ -9,12 +9,12 @@ help:
 	@echo "  make check        - Run default verification checks"
 
 test:
-	PYTHONPATH=src python -m pytest -q
+	PYTHONPATH=src .venv/bin/python -m pytest -q
 
 test-verbose:
-	PYTHONPATH=src python -m pytest -v
+	PYTHONPATH=src .venv/bin/python -m pytest -v
 
 test-cov:
-	PYTHONPATH=src python -m pytest --cov=src/rag --cov-report=term-missing
+	PYTHONPATH=src .venv/bin/python -m pytest --cov=src/rag --cov-report=term-missing
 
 check: test
