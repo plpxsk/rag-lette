@@ -8,6 +8,11 @@ To add a new backend:
 from __future__ import annotations
 
 import hashlib
+import json
+import math
+import os
+import re
+import sqlite3
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
@@ -74,12 +79,28 @@ class LanceDbAdapter(DbAdapter):
             self._db = lancedb.connect(self.uri)
         return self._db
 
+    def _table_names(self) -> set[str]:
+        db = self._connect()
+        if hasattr(db, "list_tables"):
+            table_names: set[str] = set()
+            listing = db.list_tables()
+            entries = getattr(listing, "tables", listing)
+            for entry in entries:
+                if isinstance(entry, str):
+                    table_names.add(entry)
+                elif isinstance(entry, (tuple, list)) and entry and isinstance(entry[0], str):
+                    table_names.add(entry[0])
+                elif name := getattr(entry, "name", None):
+                    table_names.add(name)
+            return table_names
+        return set(db.table_names())
+
     def setup(self, *, embedding_dim: int) -> None:
         self._connect()
 
     def add(self, rows: Sequence[dict[str, Any]]) -> None:
         db = self._connect()
-        if self.table_name in db.table_names():
+        if self.table_name in self._table_names():
             db.open_table(self.table_name).add(list(rows))
         else:
             db.create_table(self.table_name, data=list(rows))
@@ -96,8 +117,7 @@ class LanceDbAdapter(DbAdapter):
         return {"backend": "lancedb", "uri": self.uri, "table": self.table_name, "rows": rows}
 
     def exists(self) -> bool:
-        db = self._connect()
-        return self.table_name in db.table_names()
+        return self.table_name in self._table_names()
 
     def has_source(self, source: str) -> bool:
         if not self.exists():
@@ -425,30 +445,493 @@ class SqliteAdapter(DbAdapter):
     def __init__(self, uri: str, table_name: str) -> None:
         self.uri = uri
         self.table_name = table_name
+        self._db_path = self._parse_path(uri)
+        self._embedding_dim: int | None = None
+
+    @staticmethod
+    def _parse_path(uri: str) -> Path:
+        if not uri.startswith("sqlite://"):
+            raise ValueError(f"Invalid SQLite URI: {uri!r}")
+        raw_path = uri.removeprefix("sqlite://")
+        if not raw_path:
+            raise ValueError(f"SQLite URI must include a path, got {uri!r}")
+        return Path(raw_path).expanduser()
+
+    @staticmethod
+    def _cosine_distance(left: str, right: str) -> float:
+        try:
+            left_values = json.loads(left)
+            right_values = json.loads(right)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid vector payload in SQLite store: {exc}") from exc
+
+        if len(left_values) != len(right_values):
+            raise ValueError(
+                f"query dim {len(right_values)} doesn't match index dim {len(left_values)}"
+            )
+
+        dot = sum(float(a) * float(b) for a, b in zip(left_values, right_values))
+        left_norm = math.sqrt(sum(float(value) * float(value) for value in left_values))
+        right_norm = math.sqrt(sum(float(value) * float(value) for value in right_values))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 1.0
+        cosine_similarity = dot / (left_norm * right_norm)
+        return 1.0 - cosine_similarity
+
+    def _connect(self) -> sqlite3.Connection:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        conn.create_function("cosine_distance", 2, self._cosine_distance)
+        return conn
+
+    def _meta_key(self) -> str:
+        return f"{self.table_name}:embedding_dim"
+
+    def _get_stored_dim(self) -> int | None:
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "SELECT value FROM rag_meta WHERE key = ?",
+                (self._meta_key(),),
+            )
+            row = cur.fetchone()
+            return int(row["value"]) if row is not None else None
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            conn.close()
+
+    def _require_matching_dim(self, embedding_dim: int) -> None:
+        stored_dim = self._get_stored_dim()
+        if stored_dim is not None and stored_dim != embedding_dim:
+            raise RuntimeError(
+                f"embedding dim {embedding_dim} doesn't match existing index dim {stored_dim}"
+            )
 
     def setup(self, *, embedding_dim: int) -> None:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        self._require_matching_dim(embedding_dim)
+        self._embedding_dim = embedding_dim
+        conn = self._connect()
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS rag_meta ("
+                "key TEXT PRIMARY KEY,"
+                "value TEXT NOT NULL"
+                ")"
+            )
+            conn.execute(
+                f"CREATE TABLE IF NOT EXISTS {self.table_name} ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "text TEXT NOT NULL,"
+                "source TEXT,"
+                "vector TEXT NOT NULL,"
+                "content_hash TEXT NOT NULL UNIQUE"
+                ")"
+            )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {self.table_name}_source_idx "
+                f"ON {self.table_name} (source)"
+            )
+            conn.execute(
+                "INSERT INTO rag_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (self._meta_key(), str(embedding_dim)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def add(self, rows: Sequence[dict[str, Any]]) -> None:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        if not rows:
+            return
+        conn = self._connect()
+        try:
+            insert_sql = (
+                f"INSERT INTO {self.table_name} (text, source, vector, content_hash) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(content_hash) DO UPDATE "
+                "SET vector = excluded.vector, text = excluded.text, source = excluded.source"
+            )
+            for row in rows:
+                text = str(row.get("text", ""))
+                source = row.get("source")
+                vector = row.get("vector")
+                if not isinstance(vector, (list, tuple)):
+                    raise TypeError("row['vector'] must be a list[float]")
+                vector_values = [float(value) for value in vector]
+                if self._embedding_dim is None:
+                    self._embedding_dim = self._get_stored_dim()
+                if self._embedding_dim is not None and len(vector_values) != self._embedding_dim:
+                    raise RuntimeError(
+                        f"embedding dim {len(vector_values)} doesn't match "
+                        f"existing index dim {self._embedding_dim}"
+                    )
+                content_hash = _pg_content_hash(str(source) if source else None, text)
+                conn.execute(
+                    insert_sql,
+                    (text, source, json.dumps(vector_values), content_hash),
+                )
+            conn.commit()
+        finally:
+            conn.close()
 
     def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        if k <= 0:
+            return []
+        if self._embedding_dim is None:
+            self._embedding_dim = self._get_stored_dim()
+        if self._embedding_dim is not None and len(query_vector) != self._embedding_dim:
+            raise RuntimeError(
+                f"query dim {len(query_vector)} doesn't match index dim {self._embedding_dim}"
+            )
+        query_payload = json.dumps([float(value) for value in query_vector])
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"SELECT text FROM {self.table_name} "
+                "ORDER BY cosine_distance(vector, ?) ASC "
+                "LIMIT ?",
+                (query_payload, k),
+            )
+            return [row["text"] for row in cur.fetchall()]
+        finally:
+            conn.close()
 
     def info(self) -> dict[str, Any]:
-        return {"backend": "sqlite", "uri": self.uri, "table": self.table_name}
+        rows: int | None = None
+        stored_dim = self._get_stored_dim()
+        try:
+            conn = self._connect()
+            try:
+                cur = conn.execute(f"SELECT COUNT(*) AS count FROM {self.table_name}")
+                result = cur.fetchone()
+                rows = int(result["count"]) if result is not None else 0
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            pass
+        return {
+            "backend": "sqlite",
+            "uri": self.uri,
+            "table": self.table_name,
+            "rows": rows,
+            "embedding_dim": stored_dim,
+        }
 
     def exists(self) -> bool:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (self.table_name,),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur = conn.execute(f"SELECT 1 FROM {self.table_name} LIMIT 1")
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
 
     def has_source(self, source: str) -> bool:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        if not self.exists():
+            return False
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"SELECT 1 FROM {self.table_name} WHERE source = ? LIMIT 1",
+                (source,),
+            )
+            return cur.fetchone() is not None
+        finally:
+            conn.close()
 
     def delete_source(self, source: str) -> None:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        if not self.exists():
+            return
+        conn = self._connect()
+        try:
+            conn.execute(f"DELETE FROM {self.table_name} WHERE source = ?", (source,))
+            conn.commit()
+        finally:
+            conn.close()
 
     def list_sources(self) -> list[str]:
-        raise NotImplementedError("SQLite backend not yet implemented")
+        if not self.exists():
+            return []
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                f"SELECT DISTINCT source FROM {self.table_name} "
+                "WHERE source IS NOT NULL ORDER BY source"
+            )
+            return [str(row["source"]) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+
+def _weaviate_parse_uri(uri: str) -> dict[str, Any]:
+    """Parse weaviate:// URIs for local, custom, or cloud-backed connections."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "weaviate":
+        raise ValueError(f"Invalid Weaviate URI: {uri!r}")
+
+    params = parse_qs(parsed.query)
+    host = parsed.hostname
+    port = parsed.port
+    secure = params.get("secure", ["false"])[0].lower() in {"1", "true", "yes"}
+    grpc_host = params.get("grpc_host", [host])[0]
+    grpc_port = int(params.get("grpc_port", ["443" if secure else "50051"])[0])
+    grpc_secure = params.get("grpc_secure", [str(secure).lower()])[0].lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    api_key_env = params.get("api_key_env", ["WEAVIATE_API_KEY"])[0]
+    cluster_url = params.get("cluster_url", [None])[0]
+
+    if cluster_url:
+        return {
+            "mode": "cloud",
+            "cluster_url": cluster_url,
+            "api_key_env": api_key_env,
+        }
+
+    if host is None:
+        raise ValueError(
+            "Weaviate URI must include a host, for example "
+            "'weaviate://localhost:8080' or "
+            "'weaviate://cluster.example.com:443?secure=true'."
+        )
+
+    if host in {"localhost", "127.0.0.1"} and not secure and parsed.username is None:
+        return {
+            "mode": "local",
+            "host": host,
+            "port": port or 8080,
+            "grpc_port": grpc_port,
+        }
+
+    if secure and api_key_env in os.environ and parsed.username is None and grpc_host in {None, host}:
+        scheme = "https" if secure else "http"
+        return {
+            "mode": "cloud",
+            "cluster_url": f"{scheme}://{host}:{port or 443}",
+            "api_key_env": api_key_env,
+        }
+
+    return {
+        "mode": "custom",
+        "http_host": host,
+        "http_port": port or (443 if secure else 8080),
+        "http_secure": secure,
+        "grpc_host": grpc_host or host,
+        "grpc_port": grpc_port,
+        "grpc_secure": grpc_secure,
+        "api_key_env": api_key_env,
+    }
+
+
+def _weaviate_collection_name(table_name: str) -> str:
+    """Map the repo's free-form table name to a valid Weaviate collection name."""
+    cleaned = re.sub(r"[^0-9A-Za-z_]", "_", table_name.strip())
+    if not cleaned:
+        cleaned = "Embeddings"
+    if not cleaned[0].isalpha():
+        cleaned = f"C_{cleaned}"
+    return cleaned[0].upper() + cleaned[1:]
+
+
+class WeaviateAdapter(DbAdapter):
+    """Weaviate-backed vector store. URI: weaviate://HOST:PORT[?secure=true&...]"""
+
+    def __init__(self, uri: str, table_name: str) -> None:
+        self.uri = uri
+        self.table_name = table_name
+        self.collection_name = _weaviate_collection_name(table_name)
+        self._conn = _weaviate_parse_uri(uri)
+        self._client: Any = None
+
+    def _connect(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            import weaviate
+            import weaviate.classes as wvc
+            from weaviate.classes.init import Auth
+        except ImportError as exc:
+            raise RuntimeError(
+                "The 'weaviate-client' package is required for the Weaviate backend.\n"
+                "Install it with:  pip install \"rag[weaviate]\"\n"
+                f"Original error: {exc}"
+            ) from exc
+
+        mode = self._conn["mode"]
+        if mode == "local":
+            client = weaviate.connect_to_local(
+                host=self._conn["host"],
+                port=self._conn["port"],
+                grpc_port=self._conn["grpc_port"],
+            )
+        elif mode == "cloud":
+            api_key = os.environ.get(self._conn["api_key_env"])
+            if not api_key:
+                raise RuntimeError(
+                    f"{self._conn['api_key_env']} environment variable is not set for Weaviate."
+                )
+            client = weaviate.connect_to_weaviate_cloud(
+                cluster_url=self._conn["cluster_url"],
+                auth_credentials=Auth.api_key(api_key),
+            )
+        else:
+            api_key = os.environ.get(self._conn["api_key_env"])
+            auth = Auth.api_key(api_key) if api_key else None
+            client = weaviate.connect_to_custom(
+                http_host=self._conn["http_host"],
+                http_port=self._conn["http_port"],
+                http_secure=self._conn["http_secure"],
+                grpc_host=self._conn["grpc_host"],
+                grpc_port=self._conn["grpc_port"],
+                grpc_secure=self._conn["grpc_secure"],
+                auth_credentials=auth,
+            )
+
+        if not client.is_ready():
+            client.close()
+            raise RuntimeError(f"Weaviate at {self.uri!r} is not ready.")
+
+        self._client = client
+        self._wvc = wvc
+        return client
+
+    def _collection(self) -> Any:
+        client = self._connect()
+        return client.collections.use(self.collection_name)
+
+    def setup(self, *, embedding_dim: int) -> None:
+        client = self._connect()
+        if client.collections.exists(self.collection_name):
+            return
+        client.collections.create(
+            self.collection_name,
+            vector_config=self._wvc.config.Configure.Vectors.self_provided(),
+            properties=[
+                self._wvc.config.Property(
+                    name="text",
+                    data_type=self._wvc.config.DataType.TEXT,
+                ),
+                self._wvc.config.Property(
+                    name="source",
+                    data_type=self._wvc.config.DataType.TEXT,
+                ),
+            ],
+        )
+
+    def add(self, rows: Sequence[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        collection = self._collection()
+        with collection.batch.fixed_size(batch_size=200) as batch:
+            for row in rows:
+                vector = row.get("vector")
+                if not isinstance(vector, (list, tuple)):
+                    raise TypeError("row['vector'] must be a list[float]")
+                batch.add_object(
+                    properties={
+                        "text": str(row.get("text", "")),
+                        "source": row.get("source"),
+                    },
+                    vector=list(vector),
+                )
+        failed = getattr(collection.batch, "failed_objects", [])
+        if failed:
+            raise RuntimeError(f"Failed to import {len(failed)} object(s) into Weaviate.")
+
+    def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
+        if k <= 0:
+            return []
+        response = self._collection().query.near_vector(
+            near_vector=list(query_vector),
+            limit=k,
+            return_properties=["text"],
+        )
+        return [
+            obj.properties["text"]
+            for obj in response.objects
+            if isinstance(obj.properties, dict) and obj.properties.get("text")
+        ]
+
+    def info(self) -> dict[str, Any]:
+        rows: int | None = None
+        if self.exists():
+            try:
+                response = self._collection().aggregate.over_all(total_count=True)
+                rows = getattr(response, "total_count", None)
+            except Exception:
+                rows = None
+        return {
+            "backend": "weaviate",
+            "uri": self.uri,
+            "table": self.table_name,
+            "collection": self.collection_name,
+            "rows": rows,
+        }
+
+    def exists(self) -> bool:
+        try:
+            client = self._connect()
+            if not client.collections.exists(self.collection_name):
+                return False
+            response = self._collection().query.fetch_objects(limit=1, return_properties=["source"])
+            return len(response.objects) > 0
+        except Exception:
+            return False
+
+    def has_source(self, source: str) -> bool:
+        if not self._connect().collections.exists(self.collection_name):
+            return False
+        response = self._collection().query.fetch_objects(
+            filters=self._wvc.query.Filter.by_property("source").equal(source),
+            limit=1,
+            return_properties=["source"],
+        )
+        return len(response.objects) > 0
+
+    def delete_source(self, source: str) -> None:
+        if not self._connect().collections.exists(self.collection_name):
+            return
+        self._collection().data.delete_many(
+            where=self._wvc.query.Filter.by_property("source").equal(source)
+        )
+
+    def list_sources(self) -> list[str]:
+        if not self._connect().collections.exists(self.collection_name):
+            return []
+        response = self._collection().query.fetch_objects(
+            return_properties=["source"],
+            limit=10_000,
+        )
+        return sorted(
+            {
+                obj.properties["source"]
+                for obj in response.objects
+                if isinstance(obj.properties, dict) and obj.properties.get("source")
+            }
+        )
+
+    def preflight(self) -> None:
+        self._connect()
+
+    def close(self) -> None:
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _vertex_parse_uri(uri: str) -> tuple[str, str]:
@@ -664,6 +1147,8 @@ def get_db_adapter(uri: str, table_name: str) -> DbAdapter:
     """Instantiate the correct DbAdapter from a URI string."""
     if uri.startswith(("postgres://", "postgresql://")):
         return PostgresAdapter(uri, table_name)
+    if uri.startswith("weaviate://"):
+        return WeaviateAdapter(uri, table_name)
     if uri.startswith("sqlite://"):
         return SqliteAdapter(uri, table_name)
     if uri.startswith("vertex://"):
