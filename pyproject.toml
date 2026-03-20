@@ -22,6 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 lancedb      = ["lancedb"]
 postgres     = ["psycopg2-binary", "pgvector"]
+weaviate     = ["weaviate-client>=4,<5"]
+gui          = ["gradio>=4.44,<6"]
 voyageai     = ["voyageai"]
 mistral      = ["mistralai"]
 anthropic    = ["anthropic"]
@@ -33,6 +35,8 @@ unstructured = ["unstructured[all-docs]"]
 all = [
     "lancedb",
     "psycopg2-binary", "pgvector",
+    "weaviate-client>=4,<5",
+    "gradio>=4.44,<6",
     "voyageai",
     "mistralai",
     "anthropic",
@@ -50,6 +54,7 @@ dev = [
 
 [project.scripts]
 rag = "rag.cli:main"
+gui = "rag.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -61,5 +66,3 @@ target-version = "py311"
 [tool.mypy]
 python_version = "3.11"
 strict = false
-weaviate     = ["weaviate-client>=4,<5"]
-    "weaviate-client>=4,<5",
