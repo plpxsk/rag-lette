@@ -61,3 +61,5 @@ target-version = "py311"
 [tool.mypy]
 python_version = "3.11"
 strict = false
+weaviate     = ["weaviate-client>=4,<5"]
+    "weaviate-client>=4,<5",
