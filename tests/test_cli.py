@@ -42,6 +42,29 @@ def test_cli_bare_question_routes_to_default_db_and_infers_embed(monkeypatch) ->
     }
 
 
+def test_cli_quiet_suppresses_config_summary(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_text("notes", encoding="utf-8")
+
+    def fake_ingest(*args, **kwargs):
+        class Result:
+            skipped_files = []
+            failures = []
+            rows_written = 1
+            mode = "vector"
+            chunks = []
+            db_existed = False
+
+        return Result()
+
+    monkeypatch.setattr("rag.cli.ingestion_service.ingest", fake_ingest)
+
+    result = CliRunner().invoke(main, ["-q", "ingest", "./db", str(source)])
+
+    assert result.exit_code == 0
+    assert "config  llm=" not in result.output
+
+
 def test_cli_ingest_shows_unstructured_hint_for_unsupported_files(
     monkeypatch, tmp_path: Path
 ) -> None:

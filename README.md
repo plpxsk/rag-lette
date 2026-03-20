@@ -11,19 +11,36 @@ Mix and match embeddings, LLMs, and storage — all from the CLI, no code requir
 - **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine · Bedrock Knowledge Bases
 - **Parsing:** PDF, DOCX, PPTX, XLSX, and more via `basic` or `unstructured` chunkers
 
-## How it works
+## Architecture
 
-**Ingest flow:**
-```
-Documents → Chunking → Embedding → Storage (vector DB)
+`rag-lette` is a small pipeline with interchangeable adapters:
+
+```mermaid
+flowchart LR
+    A[Documents] --> B[chunk.py]
+    B --> C[embed.py]
+    C --> D[db.py]
+    Q[User question] --> E[ask command]
+    E --> D
+    D --> F[Retrieved context]
+    F --> G[generate.py]
+    Q --> G
+    G --> H[Answer]
 ```
 
-**Answer flow:**
-```
-Question → Embedding → Semantic search → Retrieved chunks → LLM generation → Answer
-```
+- `cli.py` orchestrates ingestion and question-answer flows.
+- `chunk.py` extracts and chunks documents into retrievable text units.
+- `embed.py` creates vectors through provider-specific embedding adapters.
+- `db.py` persists vectors and retrieves nearest context through DB adapters.
+- `generate.py` turns retrieved context + user question into the final answer.
+- `config.py` resolves defaults from config files, profile, flags, and env vars.
 
-Each step uses swappable providers — choose your embeddings, LLM, and storage backend independently.
+Ingest and query use the same core stages, but in reverse:
+
+- Ingest: documents are chunked, embedded, and stored.
+- Ask: the question is embedded, relevant chunks are retrieved, and the LLM generates the answer from that context.
+
+Each stage uses swappable providers, so embeddings, LLMs, and storage backends can be chosen independently.
 
 ## Install
 
@@ -76,37 +93,13 @@ rag list s3://my-bucket/rag-db
 
 ```bash
 rag ask ./db "What are the responsible AI principles?"
-rag -v ask ./db "What is AFM?" --llm claude --top-k 8 --context
+rag -q ask ./db "What is AFM?" --llm claude --top-k 8 --context
 ```
 
 **Shorthand** — ask against `./db` without subcommands:
 
 ```bash
 rag "What is AFM?"
-```
-
-## Architecture
-
-`rag-lette` is organized as a small pipeline with interchangeable adapters:
-
-- `cli.py` orchestrates ingestion and question-answer flows.
-- `chunk.py` extracts and chunks documents into retrievable text units.
-- `embed.py` creates vectors through provider-specific embedding adapters.
-- `db.py` persists vectors and retrieves nearest context through DB adapters.
-- `generate.py` turns retrieved context + user question into the final answer.
-- `config.py` resolves defaults from config files, profile, flags, and env vars.
-
-```mermaid
-flowchart LR
-    A[Documents] --> B[chunk.py]
-    B --> C[embed.py]
-    C --> D[db.py]
-    Q[User question] --> E[ask command]
-    E --> D
-    D --> F[Retrieved context]
-    F --> G[generate.py]
-    Q --> G
-    G --> H[Answer]
 ```
 
 Extension points:

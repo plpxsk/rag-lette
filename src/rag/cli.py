@@ -84,7 +84,12 @@ class SmartGroup(click.Group):
 
 
 @click.group(cls=SmartGroup)
-@click.option("--verbose", "-v", is_flag=True, help="Print resolved config before running.")
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    help="Suppress the resolved config summary before running.",
+)
 @click.option(
     "--log-level",
     default="WARNING",
@@ -93,7 +98,7 @@ class SmartGroup(click.Group):
     help="Python log level (DEBUG, INFO, WARNING, ERROR).",
 )
 @click.pass_context
-def main(ctx: click.Context, verbose: bool, log_level: str) -> None:
+def main(ctx: click.Context, quiet: bool, log_level: str) -> None:
     """RAG — chat with your documents.
 
     \b
@@ -101,7 +106,7 @@ def main(ctx: click.Context, verbose: bool, log_level: str) -> None:
       rag 'What is AFM?'
     """
     ctx.ensure_object(dict)
-    ctx.obj["verbose"] = verbose
+    ctx.obj["verbose"] = not quiet
 
     numeric = getattr(logging, log_level.upper(), logging.WARNING)
     logging.basicConfig(level=numeric, format="%(name)s: %(message)s")
@@ -370,3 +375,27 @@ def gemini_cmd(path: str, question: str, model: str, max_tokens: int) -> None:
     with console.status(f"Generating answer with [bold]{model}[/bold]..."):
         answer = direct.ask(question, files, max_tokens=max_tokens)
     console.print(Markdown(answer))
+
+
+@main.command("gui")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Host interface to bind.")
+@click.option("--port", default=7860, show_default=True, help="Port to listen on.")
+@click.option("--no-browser", is_flag=True, help="Do not open the GUI in a browser automatically.")
+@click.option(
+    "--root-dir",
+    default=str(Path.cwd()),
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Root directory shown in the file browser.",
+)
+def gui_cmd(host: str, port: int, no_browser: bool, root_dir: str) -> None:
+    """Launch the Gradio GUI front-end."""
+    try:
+        from rag.app import launch
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        launch(host=host, port=port, inbrowser=not no_browser, root_dir=root_dir)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
