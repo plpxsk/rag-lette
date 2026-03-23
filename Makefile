@@ -1,4 +1,4 @@
-.PHONY: help test test-verbose test-cov check weaviate
+.PHONY: help test test-verbose test-cov check weaviate weaviate-reset
 
 
 help:
@@ -8,6 +8,7 @@ help:
 	@echo "  make test-cov     - Run tests with coverage"
 	@echo "  make check        - Run default verification checks"
 	@echo "  make weaviate     - Start a local Weaviate container for dev"
+	@echo "  make weaviate-reset - Remove the local Weaviate container"
 
 test:
 	PYTHONPATH=src .venv/bin/python -m pytest -q
@@ -34,3 +35,6 @@ weaviate:
 			-e DEFAULT_VECTORIZER_MODULE=none \
 			cr.weaviate.io/semitechnologies/weaviate:1.30.5; \
 	fi
+
+weaviate-reset:
+	docker rm -f rag-weaviate
