@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rag.db import SqliteAdapter, get_db_adapter
+from rag.db import QueryChunk, SqliteAdapter, get_db_adapter
 
 
 def test_sqlite_adapter_round_trip_and_source_management(tmp_path) -> None:
@@ -18,6 +18,10 @@ def test_sqlite_adapter_round_trip_and_source_management(tmp_path) -> None:
 
     assert adapter.exists()
     assert adapter.query(query_vector=[0.9, 0.1], k=1) == ["alpha"]
+    assert adapter.query_chunks(query_vector=[0.9, 0.1], k=2) == [
+        QueryChunk(text="alpha", source="a.txt"),
+        QueryChunk(text="beta", source="b.txt"),
+    ]
     assert adapter.has_source("a.txt")
     assert adapter.list_sources() == ["a.txt", "b.txt"]
     assert adapter.info()["rows"] == 2

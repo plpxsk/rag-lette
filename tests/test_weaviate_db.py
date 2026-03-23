@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from rag.db import WeaviateAdapter, _weaviate_collection_name, _weaviate_parse_uri, get_db_adapter
+from rag.db import QueryChunk, WeaviateAdapter, _weaviate_collection_name, _weaviate_parse_uri, get_db_adapter
 
 
 class _FakeFilter:
@@ -179,6 +179,10 @@ def test_weaviate_adapter_round_trip(fake_weaviate) -> None:
     assert adapter.has_source("a.txt")
     assert adapter.list_sources() == ["a.txt", "b.txt"]
     assert adapter.query(query_vector=[0.5, 0.6], k=1) == ["alpha"]
+    assert adapter.query_chunks(query_vector=[0.5, 0.6], k=2) == [
+        QueryChunk(text="alpha", source="a.txt"),
+        QueryChunk(text="beta", source="b.txt"),
+    ]
     assert adapter.info()["rows"] == 2
 
     adapter.delete_source("a.txt")
@@ -191,4 +195,3 @@ def test_weaviate_adapter_round_trip(fake_weaviate) -> None:
 def test_weaviate_adapter_routing(fake_weaviate) -> None:
     adapter = get_db_adapter("weaviate://localhost:8080", "embeddings")
     assert isinstance(adapter, WeaviateAdapter)
-

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+
+from rag.db import QueryChunk
 
 
 class LLMAdapter(ABC):
@@ -92,7 +94,7 @@ def get_llm_adapter(provider: str, model: str) -> LLMAdapter:
 
 def generate(
     query: str,
-    context: list[str],
+    context: Sequence[QueryChunk],
     provider: str = "mistral",
     model: str = "ministral-3b-2512",
     temperature: float = 0.1,
@@ -106,7 +108,7 @@ def generate(
 
 def generate_stream(
     query: str,
-    context: list[str],
+    context: Sequence[QueryChunk],
     provider: str = "mistral",
     model: str = "ministral-3b-2512",
     temperature: float = 0.1,
@@ -122,14 +124,28 @@ def generate_stream(
     yield from adapter.stream(prompt, temperature=temperature, max_tokens=max_tokens)
 
 
-def _build_prompt(query: str, context: list[str]) -> str:
-    ctx = "\n\n".join(f"<chunk_{i+1}>\n{c}\n</chunk_{i+1}>" for i, c in enumerate(context))
+def _build_prompt(query: str, context: Sequence[QueryChunk]) -> str:
+    ctx = "\n\n".join(
+        _render_prompt_chunk(i + 1, chunk)
+        for i, chunk in enumerate(context)
+    )
     return (
         "Answer the query using only the context provided below. "
         "Quote relevant passages to support your answer. "
+        "Treat the source filename attached to each chunk as retrieval metadata, not as a claim. "
         "If the context does not contain enough information, say so.\n\n"
         f"<context>\n{ctx}\n</context>\n\n"
         f"<query>{query}</query>"
+    )
+
+
+def _render_prompt_chunk(index: int, chunk: QueryChunk) -> str:
+    source = chunk.source or ""
+    return (
+        f"<chunk_{index}>\n"
+        f"<source>{source}</source>\n"
+        f"{chunk.text}\n"
+        f"</chunk_{index}>"
     )
 
 

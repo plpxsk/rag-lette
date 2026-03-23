@@ -5,6 +5,8 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from rag.cli import main
+from rag.db import QueryChunk
+from rag.services import RetrievalResult
 
 
 def test_cli_bare_question_routes_to_default_db_and_infers_embed(monkeypatch) -> None:
@@ -15,13 +17,23 @@ def test_cli_bare_question_routes_to_default_db_and_infers_embed(monkeypatch) ->
         captured["embed_provider"] = cfg.embed_provider
         captured["llm_provider"] = cfg.llm_provider
         captured["question"] = question
-        return ["retrieved context"]
+        return RetrievalResult(
+            [
+                QueryChunk(text="retrieved context", source="alpha.txt"),
+                QueryChunk(text="retrieved context two", source="alpha.txt"),
+                QueryChunk(text="retrieved context three", source="beta.md"),
+            ]
+        )
 
     def fake_stream(*, query, context, provider, model, max_tokens):
         captured["stream_provider"] = provider
         captured["stream_model"] = model
         assert query == "What is AFM?"
-        assert context == ["retrieved context"]
+        assert context == [
+            QueryChunk(text="retrieved context", source="alpha.txt"),
+            QueryChunk(text="retrieved context two", source="alpha.txt"),
+            QueryChunk(text="retrieved context three", source="beta.md"),
+        ]
         assert max_tokens == 4096
         yield "streamed answer"
 
@@ -32,6 +44,9 @@ def test_cli_bare_question_routes_to_default_db_and_infers_embed(monkeypatch) ->
 
     assert result.exit_code == 0
     assert "streamed answer" in result.output
+    assert "alpha.txt: 2" in result.output
+    assert "beta.md: 1" in result.output
+    assert "Total source chunks: 3" in result.output
     assert captured == {
         "db": "./db",
         "embed_provider": "mistral",
@@ -91,13 +106,13 @@ def test_cli_ask_uses_explicit_embed_and_non_stream_generation(monkeypatch) -> N
         captured["llm_provider"] = cfg.llm_provider
         captured["llm_model"] = cfg.llm_model
         captured["question"] = question
-        return ["ctx"]
+        return RetrievalResult([QueryChunk(text="ctx", source="doc.txt")])
 
     def fake_generate(*, query, context, provider, model, max_tokens):
         captured["provider"] = provider
         captured["model"] = model
         assert query == "Explain AFM"
-        assert context == ["ctx"]
+        assert context == [QueryChunk(text="ctx", source="doc.txt")]
         assert max_tokens == 512
         return "final answer"
 
@@ -122,6 +137,8 @@ def test_cli_ask_uses_explicit_embed_and_non_stream_generation(monkeypatch) -> N
 
     assert result.exit_code == 0
     assert "final answer" in result.output
+    assert "doc.txt: 1" in result.output
+    assert "Total source chunks: 1" in result.output
     assert captured == {
         "embed_provider": "openai",
         "embed_model": "text-embedding-3-small",
@@ -131,3 +148,20 @@ def test_cli_ask_uses_explicit_embed_and_non_stream_generation(monkeypatch) -> N
         "provider": "anthropic",
         "model": "claude-haiku-4-5",
     }
+
+
+def test_cli_ask_omits_sources_when_retrieval_has_no_filenames(monkeypatch) -> None:
+    def fake_retrieve(cfg, question, *, progress=None):
+        return RetrievalResult([QueryChunk(text="ctx without source")])
+
+    def fake_generate(*, query, context, provider, model, max_tokens):
+        return "answer without sources"
+
+    monkeypatch.setattr("rag.cli.query_service.retrieve", fake_retrieve)
+    monkeypatch.setattr("rag.cli.generate", fake_generate)
+
+    result = CliRunner().invoke(main, ["ask", "./db", "Explain AFM", "--no-stream"])
+
+    assert result.exit_code == 0
+    assert "answer without sources" in result.output
+    assert "Sources" not in result.output

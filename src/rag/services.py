@@ -1,13 +1,14 @@
 """Service layer for ingestion and retrieval orchestration."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
 from rag.chunk import BASIC_EXTENSIONS, Chunk, chunk_file, list_chunkable_files
 from rag.config import RagConfig
-from rag.db import get_db_adapter
+from rag.db import QueryChunk, get_db_adapter
 from rag.embed import get_embed_adapter
 
 ProgressStage = Literal["chunking", "embedding", "writing", "uploading", "indexing", "searching"]
@@ -26,6 +27,24 @@ class IngestionResult:
     rows_written: int
     skipped_files: list[str]
     failures: list[tuple[Path, Exception]]
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    chunks: list[QueryChunk]
+
+    @property
+    def texts(self) -> list[str]:
+        return [chunk.text for chunk in self.chunks]
+
+    @property
+    def has_sources(self) -> bool:
+        return any(chunk.source for chunk in self.chunks)
+
+    @property
+    def source_counts(self) -> list[tuple[str, int]]:
+        counts = Counter(chunk.source for chunk in self.chunks if chunk.source)
+        return list(counts.items())
 
 
 class IngestionService:
@@ -280,7 +299,7 @@ class QueryService:
         question: str,
         *,
         progress: ProgressCallback | None = None,
-    ) -> list[str]:
+    ) -> RetrievalResult:
         adapter = get_db_adapter(cfg.db, cfg.table)
         if not adapter.exists():
             raise RuntimeError(
@@ -289,13 +308,13 @@ class QueryService:
 
         self._emit(progress, "start", "searching")
         if hasattr(adapter, "query_by_text"):
-            result = adapter.query_by_text(question, cfg.top_k)
+            result = RetrievalResult(adapter.query_chunks_by_text(question, cfg.top_k))
             self._emit(progress, "end", "searching")
             return result
 
         embedder = get_embed_adapter(cfg.embed_provider, cfg.embed_model)
         question_vector = embedder.embed([question])[0]
-        result = adapter.query(query_vector=question_vector, k=cfg.top_k)
+        result = RetrievalResult(adapter.query_chunks(query_vector=question_vector, k=cfg.top_k))
         self._emit(progress, "end", "searching")
         return result
 

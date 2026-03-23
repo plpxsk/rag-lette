@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import parse_qs, urlparse
@@ -64,6 +65,23 @@ class DbAdapter(ABC):
         (e.g. Postgres) override this.
         """
 
+    def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
+        """Return query results with optional source metadata when available."""
+        return [QueryChunk(text=text) for text in self.query(query_vector=query_vector, k=k)]
+
+    def query_chunks_by_text(self, query_text: str, k: int) -> list[QueryChunk]:
+        """Return text-query results with optional source metadata when available."""
+        query_by_text = getattr(self, "query_by_text", None)
+        if not callable(query_by_text):
+            raise NotImplementedError("This adapter does not support query_by_text().")
+        return [QueryChunk(text=text) for text in query_by_text(query_text, k)]
+
+
+@dataclass(frozen=True)
+class QueryChunk:
+    text: str
+    source: str | None = None
+
 
 class LanceDbAdapter(DbAdapter):
     """Local or S3-backed LanceDB.  URI: ./db  |  lancedb://./db  |  s3://bucket/path"""
@@ -106,10 +124,13 @@ class LanceDbAdapter(DbAdapter):
             db.create_table(self.table_name, data=list(rows))
 
     def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
+        return [chunk.text for chunk in self.query_chunks(query_vector=query_vector, k=k)]
+
+    def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
         db = self._connect()
         table = db.open_table(self.table_name)
         results = table.search(list(query_vector)).limit(k).to_list()
-        return [r["text"] for r in results]
+        return [QueryChunk(text=str(r["text"]), source=r.get("source")) for r in results]
 
     def info(self) -> dict[str, Any]:
         db = self._connect()
@@ -323,6 +344,11 @@ class PostgresAdapter(DbAdapter):
     def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
         if k <= 0:
             return []
+        return [chunk.text for chunk in self.query_chunks(query_vector=query_vector, k=k)]
+
+    def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
+        if k <= 0:
+            return []
         from pgvector.psycopg2 import register_vector, Vector
         from psycopg2 import sql as pgsql
         conn = self._connect()
@@ -330,12 +356,12 @@ class PostgresAdapter(DbAdapter):
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    pgsql.SQL("SELECT text FROM {} ORDER BY vector <=> %s LIMIT %s").format(
+                    pgsql.SQL("SELECT text, source FROM {} ORDER BY vector <=> %s LIMIT %s").format(
                         pgsql.Identifier(self.table_name)
                     ),
                     (Vector(list(query_vector)), k),
                 )
-                return [r[0] for r in cur.fetchall()]
+                return [QueryChunk(text=row[0], source=row[1]) for row in cur.fetchall()]
         finally:
             conn.close()
 
@@ -585,16 +611,27 @@ class SqliteAdapter(DbAdapter):
             raise RuntimeError(
                 f"query dim {len(query_vector)} doesn't match index dim {self._embedding_dim}"
             )
+        return [chunk.text for chunk in self.query_chunks(query_vector=query_vector, k=k)]
+
+    def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
+        if k <= 0:
+            return []
+        if self._embedding_dim is None:
+            self._embedding_dim = self._get_stored_dim()
+        if self._embedding_dim is not None and len(query_vector) != self._embedding_dim:
+            raise RuntimeError(
+                f"query dim {len(query_vector)} doesn't match index dim {self._embedding_dim}"
+            )
         query_payload = json.dumps([float(value) for value in query_vector])
         conn = self._connect()
         try:
             cur = conn.execute(
-                f"SELECT text FROM {self.table_name} "
+                f"SELECT text, source FROM {self.table_name} "
                 "ORDER BY cosine_distance(vector, ?) ASC "
                 "LIMIT ?",
                 (query_payload, k),
             )
-            return [row["text"] for row in cur.fetchall()]
+            return [QueryChunk(text=str(row["text"]), source=row["source"]) for row in cur.fetchall()]
         finally:
             conn.close()
 
@@ -850,13 +887,21 @@ class WeaviateAdapter(DbAdapter):
     def query(self, *, query_vector: Sequence[float], k: int) -> list[str]:
         if k <= 0:
             return []
+        return [chunk.text for chunk in self.query_chunks(query_vector=query_vector, k=k)]
+
+    def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
+        if k <= 0:
+            return []
         response = self._collection().query.near_vector(
             near_vector=list(query_vector),
             limit=k,
-            return_properties=["text"],
+            return_properties=["text", "source"],
         )
         return [
-            obj.properties["text"]
+            QueryChunk(
+                text=obj.properties["text"],
+                source=obj.properties.get("source"),
+            )
             for obj in response.objects
             if isinstance(obj.properties, dict) and obj.properties.get("text")
         ]

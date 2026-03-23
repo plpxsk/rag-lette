@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rag.db import LanceDbAdapter, get_db_adapter
+from rag.db import LanceDbAdapter, QueryChunk, get_db_adapter
 
 
 def test_lancedb_adapter_round_trip_and_source_management(tmp_path) -> None:
@@ -15,6 +15,10 @@ def test_lancedb_adapter_round_trip_and_source_management(tmp_path) -> None:
 
     assert adapter.exists()
     assert adapter.query(query_vector=[0.9, 0.1], k=1) == ["alpha"]
+    assert adapter.query_chunks(query_vector=[0.9, 0.1], k=2) == [
+        QueryChunk(text="alpha", source="a.txt"),
+        QueryChunk(text="beta", source="o'hara.txt"),
+    ]
     assert adapter.has_source("a.txt")
     assert adapter.has_source("o'hara.txt")
     assert adapter.list_sources() == ["a.txt", "o'hara.txt"]

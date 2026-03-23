@@ -6,6 +6,7 @@ import pytest
 
 from rag.chunk import Chunk
 from rag.config import RagConfig
+from rag.db import QueryChunk
 from rag.services import IngestionService, QueryService
 
 
@@ -42,6 +43,11 @@ class StubVectorAdapter:
         assert k == 3
         return ["vector-result"]
 
+    def query_chunks(self, *, query_vector: list[float], k: int) -> list[QueryChunk]:
+        assert query_vector == [0.42, 0.24]
+        assert k == 3
+        return [QueryChunk(text="vector-result", source="doc.txt")]
+
 
 class StubVertexLikeAdapter:
     def exists(self) -> bool:
@@ -51,6 +57,11 @@ class StubVertexLikeAdapter:
         assert question == "What is AFM?"
         assert k == 3
         return ["text-result"]
+
+    def query_chunks_by_text(self, question: str, k: int) -> list[QueryChunk]:
+        assert question == "What is AFM?"
+        assert k == 3
+        return [QueryChunk(text="text-result")]
 
 
 class StubMissingDbAdapter:
@@ -76,7 +87,8 @@ def test_query_service_uses_query_by_text_when_available(monkeypatch) -> None:
     monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: StubVertexLikeAdapter())
 
     result = QueryService().retrieve(cfg, "What is AFM?")
-    assert result == ["text-result"]
+    assert result.texts == ["text-result"]
+    assert result.source_counts == []
 
 
 def test_query_service_uses_vector_search_when_needed(monkeypatch) -> None:
@@ -86,7 +98,8 @@ def test_query_service_uses_vector_search_when_needed(monkeypatch) -> None:
     monkeypatch.setattr("rag.services.get_embed_adapter", lambda provider, model: StubEmbedder())
 
     result = QueryService().retrieve(cfg, "What is AFM?")
-    assert result == ["vector-result"]
+    assert result.texts == ["vector-result"]
+    assert result.source_counts == [("doc.txt", 1)]
 
 
 def test_query_service_raises_when_db_missing(monkeypatch) -> None:
@@ -130,6 +143,7 @@ def test_ingestion_service_single_file_emits_progress_and_writes(
     assert result.rows_written == 2
     assert len(adapter.added_rows) == 2
     assert adapter.embedding_dims == [2]
+    assert {row["source"] for row in adapter.added_rows} == {"doc.txt"}
     assert events == [
         ("start", "chunking"),
         ("end", "chunking"),
@@ -348,6 +362,9 @@ def test_ingestion_service_bedrock_kb_emits_upload_and_indexing_progress(
 
     assert result.mode == "bedrock-kb"
     assert result.rows_written == 1
+    assert adapter.uploaded_rows == [
+        {"path": str(source_file.resolve()), "source": "doc.pdf"}
+    ]
     assert adapter.indexing_called
     assert events == [
         ("start", "uploading"),
@@ -441,4 +458,7 @@ def test_ingestion_service_vertex_upload_emits_progress(monkeypatch, tmp_path: P
     assert result.mode == "vertex"
     assert result.rows_written == 1
     assert len(adapter.uploaded_rows) == 1
+    assert adapter.uploaded_rows == [
+        {"path": str(source_file.resolve()), "source": "doc.pdf"}
+    ]
     assert events == [("start", "uploading"), ("end", "uploading")]

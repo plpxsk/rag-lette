@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from rag.app import _build_db_uri, _infer_embed_from_llm, _resolve_model_choice
+from rag.app import _build_db_uri, _format_context, _format_source_footer, _infer_embed_from_llm, _resolve_model_choice
 from rag.config import EMBED_ALIASES, LLM_ALIASES
+from rag.db import QueryChunk
+from rag.services import RetrievalResult
 
 
 @pytest.mark.parametrize(
@@ -95,3 +97,33 @@ def test_resolve_model_choice_requires_custom_parts() -> None:
 
 def test_infer_embed_from_llm_matches_provider() -> None:
     assert _infer_embed_from_llm("openai") == "openai"
+
+
+def test_format_context_includes_source_labels_when_present() -> None:
+    result = RetrievalResult(
+        [QueryChunk(text="Chunk body", source="report.pdf"), QueryChunk(text="Other body")]
+    )
+
+    rendered = _format_context(result, show_context=True)
+
+    assert "`report.pdf`" in rendered
+    assert "Chunk body" in rendered
+    assert "Other body" in rendered
+
+
+def test_format_source_footer_omits_missing_sources() -> None:
+    assert _format_source_footer(RetrievalResult([QueryChunk(text="Chunk body")])) == ""
+
+
+def test_format_source_footer_includes_total_chunk_count() -> None:
+    footer = _format_source_footer(
+        RetrievalResult(
+            [
+                QueryChunk(text="Chunk A", source="report.pdf"),
+                QueryChunk(text="Chunk B", source="report.pdf"),
+                QueryChunk(text="Chunk C", source="notes.md"),
+            ]
+        )
+    )
+
+    assert "Total source chunks: 3" in footer

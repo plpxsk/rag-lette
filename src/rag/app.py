@@ -4,16 +4,18 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from rag.config import EMBED_ALIASES, LLM_ALIASES, RagConfig, load_config
 from rag.gemini import GeminiFileApiClient
 from rag.generate import generate, generate_stream
-from rag.services import IngestionResult, IngestionService, QueryService
+from rag.services import IngestionResult, IngestionService, QueryService, RetrievalResult
 
 ingestion_service = IngestionService()
 query_service = QueryService()
+_source_executor = ThreadPoolExecutor(max_workers=1)
 
 DB_PROVIDER_LABELS = {
     "lancedb": "LanceDB",
@@ -188,15 +190,25 @@ def _format_sources(sources: list[str]) -> list[list[str]]:
     return [[source] for source in sources]
 
 
-def _format_context(chunks: list[str], show_context: bool) -> str:
+def _format_context(result: RetrievalResult, show_context: bool) -> str:
     if not show_context:
         return "Retrieved context is hidden. Enable `Show Retrieved Context` in settings."
-    if not chunks:
+    if not result.chunks:
         return "No context retrieved."
     lines = ["### Retrieved Context"]
-    for index, chunk in enumerate(chunks, start=1):
-        lines.append(f"**[{index}]** {chunk}")
+    for index, chunk in enumerate(result.chunks, start=1):
+        label = f"`{chunk.source}`  " if chunk.source else ""
+        lines.append(f"**[{index}]** {label}{chunk.text}")
     return "\n\n".join(lines)
+
+
+def _format_source_footer(result: RetrievalResult) -> str:
+    if not result.has_sources:
+        return ""
+    lines = ["### Sources"]
+    lines.extend(f"- `{source}`: {count}" for source, count in result.source_counts)
+    lines.append(f"Total source chunks: {sum(count for _, count in result.source_counts)}")
+    return "\n".join(lines)
 
 
 def _append_message(
@@ -634,6 +646,7 @@ def create_demo(root_dir: str | Path | None = None):
             )
             retrieved = query_service.retrieve(cfg, message)
             context_markdown = _format_context(retrieved, show_context)
+            source_footer_future = _source_executor.submit(_format_source_footer, retrieved)
             status = "Generating answer..."
             if verbose:
                 status += "\n\nResolved configuration:\n" + _config_summary(cfg)
@@ -646,7 +659,7 @@ def create_demo(root_dir: str | Path | None = None):
                 answer = ""
                 for chunk in generate_stream(
                     query=message,
-                    context=retrieved,
+                    context=retrieved.chunks,
                     provider=cfg.llm_provider,
                     model=cfg.llm_model,
                     max_tokens=cfg.max_tokens,
@@ -654,13 +667,21 @@ def create_demo(root_dir: str | Path | None = None):
                     answer += chunk
                     updated_history[-1]["content"] = answer
                     yield "", updated_history, updated_history, status, context_markdown
+                source_footer = source_footer_future.result()
+                if source_footer:
+                    updated_history[-1]["content"] = f"{answer}\n\n{source_footer}"
+                    yield "", updated_history, updated_history, status, context_markdown
             else:
-                updated_history[-1]["content"] = generate(
+                answer = generate(
                     query=message,
-                    context=retrieved,
+                    context=retrieved.chunks,
                     provider=cfg.llm_provider,
                     model=cfg.llm_model,
                     max_tokens=cfg.max_tokens,
+                )
+                source_footer = source_footer_future.result()
+                updated_history[-1]["content"] = (
+                    f"{answer}\n\n{source_footer}" if source_footer else answer
                 )
                 yield "", updated_history, updated_history, status, context_markdown
         except Exception as exc:
@@ -692,16 +713,17 @@ def create_demo(root_dir: str | Path | None = None):
                 os.environ["GEMINI_API_KEY"] = gemini_api_key.strip()
             source_path = _resolve_selected_path(selection, str(browser_root))
             client = GeminiFileApiClient(model=gemini_model)
-            files = client.upload(source_path)
-            if not files:
+            prepared = client.prepare(source_path)
+            if prepared.uploaded_count == 0:
                 raise RuntimeError("No supported files found at the selected path.")
             updated_history = _append_message(history, role="user", content=message)
             updated_history = _append_message(updated_history, role="assistant", content="")
-            status = f"Uploaded {len(files)} file(s). Generating answer..."
+            mode_label = "File Search" if prepared.mode == "file_search" else "Direct"
+            status = f"Uploaded {prepared.uploaded_count} file(s) via Gemini {mode_label}. Generating answer..."
             yield "", updated_history, updated_history, status
-            updated_history[-1]["content"] = client.ask(
+            updated_history[-1]["content"] = client.ask_prepared(
                 message,
-                files,
+                prepared,
                 max_tokens=gemini_max_tokens,
             )
             yield "", updated_history, updated_history, status
@@ -712,7 +734,7 @@ def create_demo(root_dir: str | Path | None = None):
                 role="assistant",
                 content=f"Error: {exc}",
             )
-            yield "", updated_history, updated_history, f"Gemini direct failed: {exc}"
+            yield "", updated_history, updated_history, f"Gemini failed: {exc}"
 
     with gr.Blocks(title="RAG Lette GUI", fill_height=True) as demo:
         rag_history = gr.State([])

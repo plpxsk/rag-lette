@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import click
@@ -11,13 +12,15 @@ from rich.markdown import Markdown
 from rich.rule import Rule
 
 from rag.config import EMBED_ALIASES, LLM_ALIASES, load_config
+from rag.db import QueryChunk
 from rag.gemini import GeminiFileApiClient
 from rag.generate import generate, generate_stream
-from rag.services import IngestionService, QueryService
+from rag.services import IngestionService, QueryService, RetrievalResult
 
 console = Console()
 ingestion_service = IngestionService()
 query_service = QueryService()
+_source_executor = ThreadPoolExecutor(max_workers=1)
 
 
 def _infer_embed_from_llm(llm_alias: str) -> str:
@@ -63,6 +66,24 @@ def _service_progress(event: str, stage: str) -> None:
         console.print(f"[dim]{start_messages.get(stage, stage)}[/dim]")
     elif event == "end":
         console.print(f"[dim]{end_messages.get(stage, stage)}[/dim]")
+
+
+def _format_context_chunk(index: int, chunk: QueryChunk) -> str:
+    label = f"[{chunk.source}] " if chunk.source else ""
+    return f"[dim][{index}][/dim] {label}{chunk.text}\n"
+
+
+def _format_source_summary(result: RetrievalResult) -> str:
+    if not result.has_sources:
+        return ""
+    lines = ["Sources"]
+    lines.extend(f"- {source}: {count}" for source, count in result.source_counts)
+    lines.append(f"Total source chunks: {sum(count for _, count in result.source_counts)}")
+    return "\n".join(lines)
+
+
+def _start_source_summary(result: RetrievalResult) -> Future[str]:
+    return _source_executor.submit(_format_source_summary, result)
 
 
 class SmartGroup(click.Group):
@@ -284,16 +305,18 @@ def ask(
             raise click.ClickException(msg)
         raise
 
-    if show_context and retrieved:
+    source_summary_future = _start_source_summary(retrieved)
+
+    if show_context and retrieved.chunks:
         console.print(Rule("Retrieved context"))
-        for i, chunk in enumerate(retrieved, 1):
-            console.print(f"[dim][{i}][/dim] {chunk}\n")
+        for i, chunk in enumerate(retrieved.chunks, 1):
+            console.print(_format_context_chunk(i, chunk))
         console.print(Rule())
 
     if stream:
         stream_gen = generate_stream(
             query=question,
-            context=retrieved,
+            context=retrieved.chunks,
             provider=cfg.llm_provider,
             model=cfg.llm_model,
             max_tokens=cfg.max_tokens,
@@ -309,12 +332,19 @@ def ask(
         with console.status(f"Generating answer with [bold]{cfg.llm_model}[/bold]..."):
             answer = generate(
                 query=question,
-                context=retrieved,
+                context=retrieved.chunks,
                 provider=cfg.llm_provider,
                 model=cfg.llm_model,
                 max_tokens=cfg.max_tokens,
             )
         console.print(Markdown(answer))
+
+    source_summary = source_summary_future.result()
+    if source_summary:
+        console.print()
+        console.print(Rule("Sources"))
+        for line in source_summary.splitlines()[1:]:
+            console.print(line)
 
 
 @main.command("list")
@@ -352,10 +382,11 @@ def list_cmd(ctx: click.Context, db: str, table: str, profile: str | None) -> No
 @click.option("--model", default="gemini-2.5-flash", show_default=True, help="Gemini model (e.g. gemini-2.5-flash, gemini-2.5-pro).")
 @click.option("--max-tokens", default=1024, show_default=True)
 def gemini_cmd(path: str, question: str, model: str, max_tokens: int) -> None:
-    """Ask a question using Gemini File API (no ingest step, no persistent store).
+    """Ask a question using Gemini direct mode or File Search mode.
 
-    Uploads files to Gemini and uses them as context. Best for ad-hoc questions
-    against a handful of documents. Requires GEMINI_API_KEY.
+    Routes to Gemini File Search when Office files are present, otherwise uses
+    direct file uploads. Best for ad-hoc questions against a handful of
+    documents. Requires GEMINI_API_KEY.
 
     \b
     Examples:
@@ -365,15 +396,16 @@ def gemini_cmd(path: str, question: str, model: str, max_tokens: int) -> None:
     src = Path(path)
     direct = GeminiFileApiClient(model=model)
     with console.status("Uploading files to Gemini..."):
-        files = direct.upload(src)
-    if not files:
+        prepared = direct.prepare(src)
+    if prepared.uploaded_count == 0:
         raise click.ClickException(
             f"No supported files found under {path}. "
-            "Supported: .pdf, .txt, .md, .doc, .docx, .ppt, .pptx, .xls, .xlsx, .html, .csv"
+            "Supported: .pdf, .txt, .md, .html, .htm, .csv, .doc, .docx, .ppt, .pptx, .xls, .xlsx"
         )
-    console.print(f"Uploaded [bold]{len(files)}[/bold] file(s).")
+    mode_label = "File Search" if prepared.mode == "file_search" else "Direct"
+    console.print(f"Uploaded [bold]{prepared.uploaded_count}[/bold] file(s) via Gemini {mode_label}.")
     with console.status(f"Generating answer with [bold]{model}[/bold]..."):
-        answer = direct.ask(question, files, max_tokens=max_tokens)
+        answer = direct.ask_prepared(question, prepared, max_tokens=max_tokens)
     console.print(Markdown(answer))
 
 
