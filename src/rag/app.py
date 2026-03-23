@@ -8,7 +8,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from rag.config import EMBED_ALIASES, LLM_ALIASES, RagConfig, load_config
+from rag.config import (
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_PROVIDER,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_PROVIDER,
+    EMBED_ALIASES,
+    LLM_ALIASES,
+    RagConfig,
+    load_config,
+    resolve_provider_model,
+)
 from rag.gemini import GeminiFileApiClient
 from rag.generate import generate, generate_stream
 from rag.services import IngestionResult, IngestionService, QueryService, RetrievalResult
@@ -26,8 +36,6 @@ DB_PROVIDER_LABELS = {
 }
 DB_PROVIDER_CHOICES = [(label, key) for key, label in DB_PROVIDER_LABELS.items()]
 MANAGED_DB_PROVIDERS = {"vertex", "bedrock-kb"}
-LLM_CHOICES = list(LLM_ALIASES) + ["custom"]
-EMBED_CHOICES = list(EMBED_ALIASES) + ["custom"]
 LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
@@ -86,21 +94,46 @@ def _build_db_uri(
     raise ValueError(f"Unknown DB provider: {provider}")
 
 
-def _resolve_model_choice(
-    choice: str,
-    custom_provider: str,
-    custom_model: str,
+def _resolve_provider_model_input(
+    provider: str,
+    model: str,
     aliases: dict[str, tuple[str, str]],
-) -> str:
-    if choice == "custom":
-        provider = custom_provider.strip()
-        model = custom_model.strip()
-        if not provider or not model:
-            raise ValueError("Custom provider and model are both required.")
-        return f"{provider}/{model}"
-    if choice not in aliases:
-        raise ValueError(f"Unknown model choice: {choice}")
-    return choice
+    default_provider: str,
+    default_model: str,
+    *,
+    label: str,
+) -> tuple[str, str]:
+    provider_value = provider.strip()
+    model_value = model.strip()
+    if provider_value.casefold() == "auto":
+        provider_value = ""
+
+    if model_value and "/" in model_value and not provider_value:
+        inferred_provider, inferred_model = resolve_provider_model(
+            model_value,
+            aliases,
+            default_provider,
+            default_model,
+        )
+        return inferred_provider, inferred_model
+
+    if provider_value and model_value:
+        return provider_value, model_value
+
+    if provider_value and not model_value:
+        if provider_value in aliases:
+            return aliases[provider_value]
+        raise ValueError(f"{label} model is required when the provider is not a known alias.")
+
+    if model_value and not provider_value:
+        if model_value in aliases:
+            return aliases[model_value]
+        for alias_provider, alias_model in aliases.values():
+            if alias_model == model_value:
+                return alias_provider, alias_model
+        raise ValueError(f"{label} provider is required when the model is not recognized.")
+
+    return default_provider, default_model
 
 
 def _normalize_skip_extensions(raw: str) -> set[str]:
@@ -123,14 +156,21 @@ def _apply_log_level(log_level: str) -> None:
     logging.getLogger().setLevel(getattr(logging, log_level.upper(), logging.WARNING))
 
 
-def _resolve_selected_path(selection: str | list[str] | None, root_dir: str) -> Path:
+def _resolve_selected_paths(selection: str | list[str] | None, root_dir: str) -> list[Path]:
     if selection is None or selection == []:
         raise ValueError("Select a file or directory to ingest first.")
-    selected = selection[0] if isinstance(selection, list) else selection
-    path = Path(selected)
-    if not path.is_absolute():
-        path = Path(root_dir) / path
-    return path.expanduser().resolve()
+    raw_paths = selection if isinstance(selection, list) else [selection]
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in raw_paths:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = Path(root_dir) / path
+        final_path = path.expanduser().resolve()
+        if final_path not in seen:
+            resolved.append(final_path)
+            seen.add(final_path)
+    return resolved
 
 
 def _config_summary(cfg: RagConfig) -> str:
@@ -190,6 +230,10 @@ def _format_sources(sources: list[str]) -> list[list[str]]:
     return [[source] for source in sources]
 
 
+def _format_paths(paths: list[str]) -> list[list[str]]:
+    return [[path] for path in paths]
+
+
 def _format_context(result: RetrievalResult, show_context: bool) -> str:
     if not show_context:
         return "Retrieved context is hidden. Enable `Show Retrieved Context` in settings."
@@ -224,6 +268,49 @@ def _prefer(primary: str, fallback: str) -> str:
     return primary.strip() or fallback.strip()
 
 
+def _merge_ingestion_results(results: list[IngestionResult]) -> IngestionResult:
+    if not results:
+        return IngestionResult(
+            mode="vector",
+            db_existed=False,
+            chunks=[],
+            rows_written=0,
+            skipped_files=[],
+            ignored_files=[],
+            failures=[],
+        )
+
+    merged_chunks = [chunk for result in results for chunk in result.chunks]
+    merged_failures = [failure for result in results for failure in result.failures]
+    merged_skipped = [source for result in results for source in result.skipped_files]
+    merged_ignored = [ignored for result in results for ignored in result.ignored_files]
+    return IngestionResult(
+        mode=results[-1].mode,
+        db_existed=any(result.db_existed for result in results),
+        chunks=merged_chunks,
+        rows_written=sum(result.rows_written for result in results),
+        skipped_files=merged_skipped,
+        ignored_files=merged_ignored,
+        failures=merged_failures,
+    )
+
+
+def _add_ingest_targets(
+    selection: str | list[str] | None,
+    current_targets: list[str] | None,
+    root_dir: str,
+) -> tuple[list[str], list[list[str]], str]:
+    existing = list(current_targets or [])
+    resolved = [str(path) for path in _resolve_selected_paths(selection, root_dir)]
+    merged = list(dict.fromkeys([*existing, *resolved]))
+    if not merged:
+        return [], [], "No files or folders queued for ingest."
+    if len(merged) == len(existing):
+        return merged, _format_paths(merged), "Selection already queued."
+    added = len(merged) - len(existing)
+    return merged, _format_paths(merged), f"Queued {added} item(s) for ingest."
+
+
 def _format_ingestion_result(result: IngestionResult, cfg: RagConfig, verbose: bool) -> str:
     lines: list[str] = []
     if result.rows_written == 0:
@@ -240,6 +327,11 @@ def _format_ingestion_result(result: IngestionResult, cfg: RagConfig, verbose: b
         lines.append("")
         lines.append("Skipped existing sources:")
         lines.extend(f"- `{source}`" for source in result.skipped_files)
+
+    if result.ignored_files:
+        lines.append("")
+        lines.append("Ignored files:")
+        lines.extend(f"- `{ignored.path.name}`: {ignored.reason}" for ignored in result.ignored_files)
 
     if result.failures:
         lines.append("")
@@ -273,12 +365,10 @@ def _build_cfg(
     vertex_corpus: str,
     bedrock_kb_id: str,
     bedrock_data_source_id: str,
-    llm_choice: str,
-    llm_custom_provider: str,
-    llm_custom_model: str,
-    embed_choice: str,
-    embed_custom_provider: str,
-    embed_custom_model: str,
+    llm_provider: str,
+    llm_model: str,
+    embed_provider: str,
+    embed_model: str,
     chunk_method: str,
     chunk_size: int,
     chunk_overlap: int,
@@ -286,6 +376,14 @@ def _build_cfg(
     top_k: int,
     max_tokens: int,
 ) -> RagConfig:
+    resolved_llm_provider, resolved_llm_model = _resolve_provider_model_input(
+        llm_provider,
+        llm_model,
+        LLM_ALIASES,
+        DEFAULT_LLM_PROVIDER,
+        DEFAULT_LLM_MODEL,
+        label="LLM",
+    )
     overrides: dict[str, Any] = {
         "db": _build_db_uri(
             provider,
@@ -297,19 +395,31 @@ def _build_cfg(
             bedrock_kb_id,
             bedrock_data_source_id,
         ),
-        "llm": _resolve_model_choice(llm_choice, llm_custom_provider, llm_custom_model, LLM_ALIASES),
+        "llm_provider": resolved_llm_provider,
+        "llm_model": resolved_llm_model,
         "top_k": top_k,
         "max_tokens": max_tokens,
     }
 
     if not _is_managed_provider(provider):
         overrides["table"] = table
-        overrides["embed"] = _resolve_model_choice(
-            embed_choice,
-            embed_custom_provider,
-            embed_custom_model,
-            EMBED_ALIASES,
-        )
+        if not embed_provider.strip() and not embed_model.strip():
+            embed_alias = _infer_embed_from_llm(resolved_llm_provider)
+            resolved_embed_provider, resolved_embed_model = EMBED_ALIASES.get(
+                embed_alias,
+                (DEFAULT_EMBED_PROVIDER, DEFAULT_EMBED_MODEL),
+            )
+        else:
+            resolved_embed_provider, resolved_embed_model = _resolve_provider_model_input(
+                embed_provider,
+                embed_model,
+                EMBED_ALIASES,
+                DEFAULT_EMBED_PROVIDER,
+                DEFAULT_EMBED_MODEL,
+                label="Embedding",
+            )
+        overrides["embed_provider"] = resolved_embed_provider
+        overrides["embed_model"] = resolved_embed_model
         overrides["chunk_method"] = chunk_method
         overrides["chunk_size"] = chunk_size
         overrides["chunk_overlap"] = chunk_overlap
@@ -331,19 +441,19 @@ def create_demo(root_dir: str | Path | None = None):
 
     browser_root = Path(root_dir or Path.cwd()).expanduser().resolve()
 
-    def update_provider_controls(provider: str | None, embed_choice: str):
+    def update_provider_controls(provider: str | None):
         managed = _is_managed_provider(provider)
         return (
             gr.update(visible=provider == "lancedb"),
             gr.update(visible=provider == "postgres"),
             gr.update(visible=provider == "weaviate"),
             gr.update(visible=provider == "vertex"),
+            gr.update(visible=provider == "vertex"),
+            gr.update(visible=provider == "bedrock-kb"),
             gr.update(visible=provider == "bedrock-kb"),
             gr.update(visible=not managed),
             gr.update(visible=not managed),
             gr.update(visible=not managed),
-            gr.update(visible=not managed and embed_choice == "custom"),
-            gr.update(visible=not managed and embed_choice == "custom"),
         )
 
     def update_db_summary(
@@ -371,14 +481,6 @@ def create_demo(root_dir: str | Path | None = None):
 
     def update_pdf_strategy(chunk_method: str):
         return gr.update(visible=chunk_method == "unstructured")
-
-    def update_llm_custom(choice: str):
-        visible = choice == "custom"
-        return gr.update(visible=visible), gr.update(visible=visible)
-
-    def update_embed_custom(choice: str, provider: str | None):
-        visible = choice == "custom" and not _is_managed_provider(provider)
-        return gr.update(visible=visible), gr.update(visible=visible)
 
     def refresh_sources(
         provider: str | None,
@@ -439,7 +541,7 @@ def create_demo(root_dir: str | Path | None = None):
             return [], f"Could not load sources: {exc}", summary
 
     def ingest_files(
-        selection: str | list[str] | None,
+        selection: list[str] | None,
         provider: str | None,
         table: str,
         profile: str,
@@ -450,12 +552,10 @@ def create_demo(root_dir: str | Path | None = None):
         vertex_corpus: str,
         bedrock_kb_id: str,
         bedrock_data_source_id: str,
-        llm_choice: str,
-        llm_custom_provider: str,
-        llm_custom_model: str,
-        embed_choice: str,
-        embed_custom_provider: str,
-        embed_custom_model: str,
+        llm_provider: str,
+        llm_model: str,
+        embed_provider: str,
+        embed_model: str,
         chunk_method: str,
         chunk_size: int,
         chunk_overlap: int,
@@ -496,7 +596,6 @@ def create_demo(root_dir: str | Path | None = None):
         )
 
         try:
-            source_path = _resolve_selected_path(selection, str(browser_root))
             cfg = _build_cfg(
                 provider=provider,
                 table=table,
@@ -508,12 +607,10 @@ def create_demo(root_dir: str | Path | None = None):
                 vertex_corpus=vertex_corpus,
                 bedrock_kb_id=bedrock_kb_id,
                 bedrock_data_source_id=bedrock_data_source_id,
-                llm_choice=llm_choice,
-                llm_custom_provider=llm_custom_provider,
-                llm_custom_model=llm_custom_model,
-                embed_choice=embed_choice,
-                embed_custom_provider=embed_custom_provider,
-                embed_custom_model=embed_custom_model,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                embed_provider=embed_provider,
+                embed_model=embed_model,
                 chunk_method=chunk_method,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -521,12 +618,17 @@ def create_demo(root_dir: str | Path | None = None):
                 top_k=top_k,
                 max_tokens=max_tokens,
             )
-            result = ingestion_service.ingest(
-                cfg,
-                source_path,
-                skip_extensions=_normalize_skip_extensions(skip_extensions),
-                overwrite=overwrite,
-            )
+            selected_paths = _resolve_selected_paths(selection, str(browser_root))
+            results = [
+                ingestion_service.ingest(
+                    cfg,
+                    source_path,
+                    skip_extensions=_normalize_skip_extensions(skip_extensions),
+                    overwrite=overwrite,
+                )
+                for source_path in selected_paths
+            ]
+            result = _merge_ingestion_results(results)
             loaded_sources = _load_sources(cfg)
             sources = _format_sources(loaded_sources)
             summary = _summarize_db_selection(
@@ -545,6 +647,8 @@ def create_demo(root_dir: str | Path | None = None):
                 sources,
                 _format_ingestion_result(result, cfg, verbose),
                 summary,
+                [],
+                [],
             )
         except Exception as exc:
             summary = _summarize_db_selection(
@@ -559,7 +663,7 @@ def create_demo(root_dir: str | Path | None = None):
                 table,
             )
             summary += "\n**Loaded Sources:** `Unavailable`"
-            return [], f"Ingest failed: {exc}", summary
+            return [], f"Ingest failed: {exc}", summary, selection or [], _format_paths(selection or [])
 
     def chat_with_rag(
         message: str,
@@ -574,12 +678,10 @@ def create_demo(root_dir: str | Path | None = None):
         vertex_corpus: str,
         bedrock_kb_id: str,
         bedrock_data_source_id: str,
-        llm_choice: str,
-        llm_custom_provider: str,
-        llm_custom_model: str,
-        embed_choice: str,
-        embed_custom_provider: str,
-        embed_custom_model: str,
+        llm_provider: str,
+        llm_model: str,
+        embed_provider: str,
+        embed_model: str,
         chunk_method: str,
         chunk_size: int,
         chunk_overlap: int,
@@ -638,12 +740,10 @@ def create_demo(root_dir: str | Path | None = None):
                 vertex_corpus=vertex_corpus,
                 bedrock_kb_id=bedrock_kb_id,
                 bedrock_data_source_id=bedrock_data_source_id,
-                llm_choice=llm_choice,
-                llm_custom_provider=llm_custom_provider,
-                llm_custom_model=llm_custom_model,
-                embed_choice=embed_choice,
-                embed_custom_provider=embed_custom_provider,
-                embed_custom_model=embed_custom_model,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                embed_provider=embed_provider,
+                embed_model=embed_model,
                 chunk_method=chunk_method,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
@@ -718,7 +818,8 @@ def create_demo(root_dir: str | Path | None = None):
         try:
             if gemini_api_key.strip():
                 os.environ["GEMINI_API_KEY"] = gemini_api_key.strip()
-            source_path = _resolve_selected_path(selection, str(browser_root))
+            selected_paths = _resolve_selected_paths(selection, str(browser_root))
+            source_path = selected_paths[0]
             client = GeminiFileApiClient(model=gemini_model)
             prepared = client.prepare(source_path)
             if prepared.uploaded_count == 0:
@@ -746,6 +847,8 @@ def create_demo(root_dir: str | Path | None = None):
     with gr.Blocks(title="RAG Lette GUI", fill_height=True) as demo:
         rag_history = gr.State([])
         gemini_history = gr.State([])
+        ingest_targets = gr.State([])
+        ingest_root = gr.State(str(browser_root))
 
         gr.Markdown(
             """
@@ -757,12 +860,25 @@ def create_demo(root_dir: str | Path | None = None):
         with gr.Sidebar(open=True):
             with gr.Accordion("1. Select Files to Ingest", open=True):
                 ingest_selection = gr.FileExplorer(
-                    label="File or Folder",
+                    label="Browse File or Folder",
                     root_dir=str(browser_root),
                     file_count="single",
                     glob="**/*",
                 )
-                ingest_button = gr.Button("Ingest into Selected DB", variant="primary")
+                with gr.Row():
+                    add_to_ingest = gr.Button("Add to Queue")
+                    clear_ingest_queue = gr.Button("Clear Queue")
+                ingest_queue = gr.Dataframe(
+                    headers=["Queued for Ingest"],
+                    datatype=["str"],
+                    value=[],
+                    interactive=False,
+                    row_count=(0, "dynamic"),
+                    col_count=(1, "fixed"),
+                    wrap=True,
+                    label="Ingest Queue",
+                )
+                ingest_button = gr.Button("Ingest Queue into Selected DB", variant="primary")
 
             with gr.Accordion("2. Choose Database", open=True):
                 db_provider = gr.Dropdown(
@@ -806,18 +922,14 @@ def create_demo(root_dir: str | Path | None = None):
                 )
 
             with gr.Accordion("3. Embeddings", open=False):
-                embed_choice = gr.Dropdown(
-                    choices=EMBED_CHOICES,
-                    value="mistral",
-                    label="Embedding Model",
+                embed_provider = gr.Textbox(
+                    label="Embed Provider",
+                    value="",
+                    info="Leave blank or set to auto to infer from the model or LLM provider.",
                 )
-                embed_custom_provider = gr.Textbox(
-                    label="Custom Embed Provider",
-                    visible=False,
-                )
-                embed_custom_model = gr.Textbox(
-                    label="Custom Embed Model",
-                    visible=False,
+                embed_model = gr.Textbox(
+                    label="Embed Model",
+                    value=DEFAULT_EMBED_MODEL,
                 )
 
             with gr.Accordion("4. Ingest Settings", open=False):
@@ -881,18 +993,14 @@ def create_demo(root_dir: str | Path | None = None):
                         )
                     )
                     with gr.Accordion("Generation Model", open=False):
-                        llm_choice = gr.Dropdown(
-                            choices=LLM_CHOICES,
-                            value="mistral",
-                            label="LLM",
+                        llm_provider = gr.Textbox(
+                            label="LLM Provider",
+                            value="",
+                            info="Leave blank or set to auto to infer from the model.",
                         )
-                        llm_custom_provider = gr.Textbox(
-                            label="Custom LLM Provider",
-                            visible=False,
-                        )
-                        llm_custom_model = gr.Textbox(
-                            label="Custom LLM Model",
-                            visible=False,
+                        llm_model = gr.Textbox(
+                            label="LLM Model",
+                            value=DEFAULT_LLM_MODEL,
                         )
                     with gr.Accordion("Query Settings", open=False):
                         top_k = gr.Number(label="Top K", value=5, precision=0)
@@ -947,9 +1055,9 @@ def create_demo(root_dir: str | Path | None = None):
                     gr.Markdown(
                         """
                         ### Workflow
-                        1. Pick files in the sidebar.
+                        1. Pick files in the sidebar and add them to the queue.
                         2. Choose or define a database.
-                        3. Ingest content.
+                        3. Ingest the queue.
                         4. Refresh loaded sources if needed.
                         5. Ask questions here.
                         """
@@ -990,7 +1098,7 @@ def create_demo(root_dir: str | Path | None = None):
                         "Uploads selected files to Gemini and asks without persisting anything."
                     )
 
-        provider_inputs = [db_provider, embed_choice]
+        provider_inputs = [db_provider]
         provider_outputs = [
             lancedb_path,
             postgres_uri,
@@ -1000,30 +1108,15 @@ def create_demo(root_dir: str | Path | None = None):
             bedrock_kb_id,
             bedrock_data_source_id,
             table,
-            embed_custom_provider,
-            embed_custom_model,
+            embed_provider,
+            embed_model,
         ]
         db_provider.change(
             update_provider_controls,
             inputs=provider_inputs,
             outputs=provider_outputs,
         )
-        embed_choice.change(
-            update_provider_controls,
-            inputs=provider_inputs,
-            outputs=provider_outputs,
-        )
         chunk_method.change(update_pdf_strategy, inputs=chunk_method, outputs=pdf_strategy)
-        llm_choice.change(
-            update_llm_custom,
-            inputs=llm_choice,
-            outputs=[llm_custom_provider, llm_custom_model],
-        )
-        embed_choice.change(
-            update_embed_custom,
-            inputs=[embed_choice, db_provider],
-            outputs=[embed_custom_provider, embed_custom_model],
-        )
 
         db_summary_inputs = [
             db_provider,
@@ -1066,6 +1159,15 @@ def create_demo(root_dir: str | Path | None = None):
             bedrock_data_source_id,
             log_level,
         ]
+        add_to_ingest.click(
+            _add_ingest_targets,
+            inputs=[ingest_selection, ingest_targets, ingest_root],
+            outputs=[ingest_targets, ingest_queue, rag_status],
+        )
+        clear_ingest_queue.click(
+            lambda: ([], [], "Ingest queue cleared."),
+            outputs=[ingest_targets, ingest_queue, rag_status],
+        )
         refresh_button.click(
             refresh_sources,
             inputs=source_inputs,
@@ -1083,12 +1185,10 @@ def create_demo(root_dir: str | Path | None = None):
             vertex_corpus,
             bedrock_kb_id,
             bedrock_data_source_id,
-            llm_choice,
-            llm_custom_provider,
-            llm_custom_model,
-            embed_choice,
-            embed_custom_provider,
-            embed_custom_model,
+            llm_provider,
+            llm_model,
+            embed_provider,
+            embed_model,
             chunk_method,
             chunk_size,
             chunk_overlap,
@@ -1129,7 +1229,7 @@ def create_demo(root_dir: str | Path | None = None):
         ingest_button.click(
             ingest_files,
             inputs=[
-                ingest_selection,
+                ingest_targets,
                 *shared_inputs,
                 skip_extensions,
                 overwrite,
@@ -1137,7 +1237,7 @@ def create_demo(root_dir: str | Path | None = None):
                 log_level,
                 *ingest_credential_inputs,
             ],
-            outputs=[source_table, rag_status, current_db],
+            outputs=[source_table, rag_status, current_db, ingest_targets, ingest_queue],
         )
 
         rag_submit_inputs = [

@@ -10,25 +10,36 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+DEFAULT_EMBED_PROVIDER = "mistral"
+DEFAULT_EMBED_MODEL = "mistral-embed"
+DEFAULT_LLM_PROVIDER = "mistral"
+DEFAULT_LLM_MODEL = "ministral-3b-2512"
+
 LLM_ALIASES: dict[str, tuple[str, str]] = {
-    "mistral":        ("mistral",   "ministral-3b-2512"),
-    "mistral-small":  ("mistral",   "ministral-3b-2512"),
-    "mistral-large":  ("mistral",   "mistral-large-2512"),
-    "claude":         ("anthropic", "claude-haiku-4-5"),
-    "anthropic":      ("anthropic", "claude-haiku-4-5"),
-    "gpt-4o":         ("openai",    "gpt-4o"),
-    "openai":         ("openai",    "gpt-4o"),
-    "gemini":         ("google",    "gemini-2.5-flash"),
-    "bedrock":        ("bedrock",   "amazon.nova-lite-v1:0"),
+    "mistral":         ("mistral",   DEFAULT_LLM_MODEL),
+    "mistral-small":   ("mistral",   DEFAULT_LLM_MODEL),
+    "mistral-large":   ("mistral",   "mistral-large-2512"),
+    "claude":          ("anthropic", "claude-haiku-4-5"),
+    "anthropic":       ("anthropic", "claude-haiku-4-5"),
+    "claude-sonnet-4-5": ("anthropic", "claude-sonnet-4-5"),
+    "gpt-4o":          ("openai",    "gpt-4o"),
+    "openai":          ("openai",    "gpt-4o"),
+    "gpt-5.4":         ("openai",    "gpt-5.4"),
+    "gpt-5.4-mini":    ("openai",    "gpt-5-mini-2025-08-07"),
+    "gpt-5.4-nano":    ("openai",    "gpt-5-nano-2025-08-07"),
+    "gpt-5-mini":      ("openai",    "gpt-5-mini-2025-08-07"),
+    "gpt-5-nano":      ("openai",    "gpt-5-nano-2025-08-07"),
+    "gemini":          ("google",    "gemini-2.5-flash"),
+    "bedrock":         ("bedrock",   "amazon.nova-lite-v1:0"),
 }
 
 EMBED_ALIASES: dict[str, tuple[str, str]] = {
-    "mistral":   ("mistral",   "mistral-embed"),
+    "mistral":   (DEFAULT_EMBED_PROVIDER, DEFAULT_EMBED_MODEL),
     "voyageai":  ("voyageai",  "voyage-3.5-lite"),
     "voyage":    ("voyageai",  "voyage-3.5-lite"),
     "openai":    ("openai",    "text-embedding-3-small"),
     "gemini":    ("google",    "gemini-embedding-001"),
-    "bedrock":   ("bedrock",  "cohere.embed-english-v3"),
+    "bedrock":   ("bedrock",   "cohere.embed-english-v3"),
 }
 
 
@@ -38,11 +49,11 @@ class RagConfig(BaseModel):
     db: str = Field(default="./db", description="Database URI")
     table: str = Field(default="embeddings", description="Table/collection name")
 
-    embed_provider: str = Field(default="mistral")
-    embed_model: str = Field(default="mistral-embed")
+    embed_provider: str = Field(default=DEFAULT_EMBED_PROVIDER)
+    embed_model: str = Field(default=DEFAULT_EMBED_MODEL)
 
-    llm_provider: str = Field(default="mistral")
-    llm_model: str = Field(default="ministral-3b-2512")
+    llm_provider: str = Field(default=DEFAULT_LLM_PROVIDER)
+    llm_model: str = Field(default=DEFAULT_LLM_MODEL)
 
     top_k: int = Field(default=5)
     max_tokens: int = Field(default=4096)
@@ -79,7 +90,33 @@ def _parse_provider_model(
         return provider.strip(), model.strip()
     if value in aliases:
         return aliases[value]
-    return default_provider, value
+    return _resolve_model_only(value, aliases, default_provider)
+
+
+def _resolve_model_only(
+    model: str,
+    aliases: dict[str, tuple[str, str]],
+    default_provider: str,
+) -> tuple[str, str]:
+    if model in aliases:
+        return aliases[model]
+    matches = {provider for provider, alias_model in aliases.values() if alias_model == model}
+    if not matches:
+        return default_provider, model
+    if default_provider in matches:
+        return default_provider, model
+    provider = sorted(matches)[0]
+    return provider, model
+
+
+def resolve_provider_model(
+    value: str,
+    aliases: dict[str, tuple[str, str]],
+    default_provider: str,
+    default_model: str,
+) -> tuple[str, str]:
+    """Resolve a provider/model shorthand into canonical provider and model strings."""
+    return _parse_provider_model(value, aliases, default_provider, default_model)
 
 
 def _flatten(raw: dict[str, Any]) -> dict[str, Any]:
@@ -87,11 +124,11 @@ def _flatten(raw: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in raw.items():
         if key == "embed":
-            p, m = _parse_provider_model(str(value), EMBED_ALIASES, "mistral", "mistral-embed")
+            p, m = _parse_provider_model(str(value), EMBED_ALIASES, DEFAULT_EMBED_PROVIDER, DEFAULT_EMBED_MODEL)
             out.setdefault("embed_provider", p)
             out.setdefault("embed_model", m)
         elif key == "llm":
-            p, m = _parse_provider_model(str(value), LLM_ALIASES, "mistral", "ministral-3b-2512")
+            p, m = _parse_provider_model(str(value), LLM_ALIASES, DEFAULT_LLM_PROVIDER, DEFAULT_LLM_MODEL)
             out.setdefault("llm_provider", p)
             out.setdefault("llm_model", m)
         else:
@@ -117,16 +154,33 @@ def load_config(
     }
 
     env_map: dict[str, str] = {
-        "RAG_DB":         "db",
-        "RAG_TABLE":      "table",
-        "RAG_LLM":        "llm",
-        "RAG_EMBED":      "embed",
-        "RAG_TOP_K":      "top_k",
-        "RAG_MAX_TOKENS": "max_tokens",
+        "RAG_DB":            "db",
+        "RAG_TABLE":         "table",
+        "RAG_LLM":           "llm",
+        "RAG_LLM_PROVIDER":  "llm_provider",
+        "RAG_LLM_MODEL":     "llm_model",
+        "RAG_EMBED":         "embed",
+        "RAG_EMBED_PROVIDER": "embed_provider",
+        "RAG_EMBED_MODEL":   "embed_model",
+        "RAG_TOP_K":         "top_k",
+        "RAG_MAX_TOKENS":    "max_tokens",
     }
     for env_key, cfg_key in env_map.items():
         if val := os.environ.get(env_key):
             merged.update(_flatten({cfg_key: val}))
+
+    if "llm_model" in merged and not merged.get("llm_provider"):
+        merged["llm_provider"], merged["llm_model"] = _resolve_model_only(
+            str(merged["llm_model"]),
+            LLM_ALIASES,
+            DEFAULT_LLM_PROVIDER,
+        )
+    if "embed_model" in merged and not merged.get("embed_provider"):
+        merged["embed_provider"], merged["embed_model"] = _resolve_model_only(
+            str(merged["embed_model"]),
+            EMBED_ALIASES,
+            DEFAULT_EMBED_PROVIDER,
+        )
 
     valid = {k: v for k, v in merged.items() if k in RagConfig.model_fields}
     return RagConfig(**valid)

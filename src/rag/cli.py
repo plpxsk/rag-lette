@@ -1,7 +1,6 @@
 """CLI entry point: `rag ingest` and `rag ask`."""
 from __future__ import annotations
 
-import difflib
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -12,8 +11,18 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
-from rag.config import EMBED_ALIASES, LLM_ALIASES, load_config
-from rag.db import QueryChunk
+from rag.chunk import BASIC_EXTENSIONS, UNSTRUCTURED_EXTENSIONS
+from rag.config import (
+    DEFAULT_EMBED_MODEL,
+    DEFAULT_EMBED_PROVIDER,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_LLM_PROVIDER,
+    EMBED_ALIASES,
+    LLM_ALIASES,
+    load_config,
+    resolve_provider_model,
+)
+from rag.db import QueryChunk, get_db_adapter
 from rag.gemini import GeminiFileApiClient, GeminiMode
 from rag.generate import generate, generate_stream
 from rag.services import IngestionService, QueryService, RetrievalResult
@@ -22,6 +31,35 @@ console = Console()
 ingestion_service = IngestionService()
 query_service = QueryService()
 _source_executor = ThreadPoolExecutor(max_workers=1)
+_LOG_LEVEL_CHOICES = tuple(logging.getLevelNamesMapping())
+
+
+def _configure_logging(level_name: str) -> None:
+    numeric = logging.getLevelNamesMapping()[level_name.upper()]
+    logging.basicConfig(level=numeric, format="%(name)s: %(message)s", force=True)
+
+
+def _apply_log_level(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
+    if value is None or ctx.resilient_parsing:
+        return
+    ctx.ensure_object(dict)
+    ctx.obj["log_level"] = value.upper()
+    _configure_logging(value.upper())
+
+
+def _log_option(*, default: str | None, hidden: bool = False) -> click.Option:
+    return click.option(
+        "--log",
+        "log_level",
+        default=default,
+        type=click.Choice(_LOG_LEVEL_CHOICES, case_sensitive=False),
+        metavar="LEVEL",
+        help="Python log level (debug, info, warning, error, critical, ...).",
+        expose_value=False,
+        callback=_apply_log_level,
+        hidden=hidden,
+        show_default=default is not None,
+    )
 
 
 def _infer_embed_from_llm(llm_alias: str) -> str:
@@ -34,16 +72,36 @@ def _infer_embed_from_llm(llm_alias: str) -> str:
     return "mistral"
 
 
-def _fuzzy_option(value: str, known: list[str], label: str) -> str:
-    """Validate value against known aliases; suggest close matches on typo."""
-    if value in known:
-        return value
-    provider = value.split("/")[0]
-    if provider in known:
-        return value
-    matches = difflib.get_close_matches(provider, known, n=1, cutoff=0.6)
-    hint = f" Did you mean '{matches[0]}'?" if matches else f" Valid options: {', '.join(known)}."
-    raise click.BadParameter(f"'{value}' is not a known {label}.{hint}", param_hint=f"--{label}")
+def _resolve_provider_model_options(
+    *,
+    legacy: str | None,
+    provider: str | None,
+    model: str | None,
+    aliases: dict[str, tuple[str, str]],
+    default_provider: str,
+    default_model: str,
+) -> tuple[str, str, bool]:
+    """Resolve split or legacy provider/model inputs into one canonical pair."""
+    provided = legacy is not None or provider is not None or model is not None
+    if legacy is not None:
+        legacy_provider, legacy_model = resolve_provider_model(
+            legacy,
+            aliases,
+            default_provider,
+            default_model,
+        )
+        provider = provider or legacy_provider
+        model = model or legacy_model
+    resolved_model = model or default_model
+    if provider is None:
+        provider, inferred_model = resolve_provider_model(
+            resolved_model,
+            aliases,
+            default_provider,
+            default_model,
+        )
+        resolved_model = inferred_model
+    return provider, resolved_model, provided
 
 
 def _service_progress(event: str, stage: str) -> None:
@@ -69,6 +127,16 @@ def _service_progress(event: str, stage: str) -> None:
         console.print(f"[dim]{end_messages.get(stage, stage)}[/dim]")
 
 
+def _ignored_file_hint(reason: str, filename: str, chunk_method: str) -> str:
+    if (
+        chunk_method == "basic"
+        and reason.startswith("unsupported file type")
+        and Path(filename).suffix.lower() in UNSTRUCTURED_EXTENSIONS - BASIC_EXTENSIONS
+    ):
+        return "\n  Tip: use --chunk unstructured for this file type."
+    return ""
+
+
 def _format_context_chunk(index: int, chunk: QueryChunk) -> str:
     label = f"[{chunk.source}] " if chunk.source else ""
     return f"[dim][{index}][/dim] {label}{chunk.text}\n"
@@ -85,6 +153,18 @@ def _format_source_summary(result: RetrievalResult) -> str:
 
 def _start_source_summary(result: RetrievalResult) -> Future[str]:
     return _source_executor.submit(_format_source_summary, result)
+
+
+def _is_list_files_query(question: str) -> bool:
+    return question.strip().casefold() == "list files"
+
+
+def _print_sources_list(sources: list[str]) -> None:
+    if not sources:
+        console.print("[dim]No files ingested yet.[/dim]")
+        return
+    for source in sources:
+        console.print(source)
 
 
 class SmartGroup(click.Group):
@@ -112,15 +192,20 @@ class SmartGroup(click.Group):
     is_flag=True,
     help="Suppress the resolved config summary before running.",
 )
+@_log_option(default="WARNING")
 @click.option(
     "--log-level",
-    default="WARNING",
-    show_default=True,
+    "log_level",
+    default=None,
+    type=click.Choice(_LOG_LEVEL_CHOICES, case_sensitive=False),
     metavar="LEVEL",
-    help="Python log level (DEBUG, INFO, WARNING, ERROR).",
+    help="Python log level (debug, info, warning, error, critical, ...).",
+    expose_value=False,
+    callback=_apply_log_level,
+    hidden=True,
 )
 @click.pass_context
-def main(ctx: click.Context, quiet: bool, log_level: str) -> None:
+def main(ctx: click.Context, quiet: bool) -> None:
     """RAG — chat with your documents.
 
     \b
@@ -130,9 +215,6 @@ def main(ctx: click.Context, quiet: bool, log_level: str) -> None:
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = not quiet
 
-    numeric = getattr(logging, log_level.upper(), logging.WARNING)
-    logging.basicConfig(level=numeric, format="%(name)s: %(message)s")
-
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -140,22 +222,79 @@ def main(ctx: click.Context, quiet: bool, log_level: str) -> None:
         pass
 
 
-def _print_config(cfg: object) -> None:
+def _is_managed_db(db: str) -> bool:
+    return db.startswith(("vertex://", "bedrock-kb://"))
+
+
+def _print_config(*parts: str) -> None:
     """Print a one-line config summary to the console."""
+    if not parts:
+        return
+    console.print(f"[dim]config  {'  '.join(parts)}[/dim]")
+
+
+def _print_ingest_config(cfg: object) -> None:
+    """Print the config fields used by ingest."""
     from rag.config import RagConfig
+
     config: RagConfig = cfg  # type: ignore[assignment]
-    console.print(
-        f"[dim]config  llm=[bold]{config.llm_provider}/{config.llm_model}[/bold]"
-        f"  embed={config.embed_provider}/{config.embed_model}"
-        f"  db={config.db}  table={config.table}  top_k={config.top_k}[/dim]"
+    parts = [
+        f"db={config.db}",
+        f"table={config.table}",
+    ]
+    if not _is_managed_db(config.db):
+        parts.extend(
+            [
+                f"embed={config.embed_provider}/{config.embed_model}",
+                f"chunk={config.chunk_method}",
+                f"chunk_size={config.chunk_size}",
+                f"chunk_overlap={config.chunk_overlap}",
+            ]
+        )
+        if config.chunk_method == "unstructured":
+            parts.append(f"pdf_strategy={config.pdf_strategy}")
+    _print_config(*parts)
+
+
+def _print_ask_config(cfg: object) -> None:
+    """Print the config fields used by ask."""
+    from rag.config import RagConfig
+
+    config: RagConfig = cfg  # type: ignore[assignment]
+    parts = [
+        f"db={config.db}",
+        f"table={config.table}",
+    ]
+    if not _is_managed_db(config.db):
+        parts.append(f"embed={config.embed_provider}/{config.embed_model}")
+    parts.extend(
+        [
+            f"llm=[bold]{config.llm_provider}/{config.llm_model}[/bold]",
+            f"top_k={config.top_k}",
+            f"max_tokens={config.max_tokens}",
+        ]
     )
+    _print_config(*parts)
 
 
 @main.command()
+@_log_option(default=None)
 @click.argument("db")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--table", default="embeddings", show_default=True, help="Table name in the DB.")
-@click.option("--embed", default="mistral", show_default=True, help="Embedding provider/model (e.g. mistral, voyageai).")
+@click.option(
+    "--embed-provider",
+    default=None,
+    show_default=DEFAULT_EMBED_PROVIDER,
+    help="Embedding provider.",
+)
+@click.option(
+    "--embed-model",
+    default=DEFAULT_EMBED_MODEL,
+    show_default=True,
+    help="Embedding model.",
+)
+@click.option("--embed", default=None, hidden=True, help="Legacy embedding provider/model shorthand.")
 @click.option("--chunk", "chunk_method", default="basic", show_default=True, type=click.Choice(["basic", "unstructured"]), help="Chunking method.")
 @click.option("--chunk-size", default=1000, show_default=True, help="Max characters per chunk.")
 @click.option("--chunk-overlap", default=200, show_default=True, help="Overlap between chunks.")
@@ -169,7 +308,9 @@ def ingest(
     db: str,
     path: str,
     table: str,
-    embed: str,
+    embed_provider: str,
+    embed_model: str,
+    embed: str | None,
     chunk_method: str,
     chunk_size: int,
     chunk_overlap: int,
@@ -186,18 +327,28 @@ def ingest(
     \b
     Examples:
       rag ingest ./db ./docs/
-      rag ingest ./db paper.pdf --embed mistral --chunk-size 800
+      rag ingest ./db paper.pdf --embed-provider mistral --embed-model mistral-embed --chunk-size 800
       rag ingest ./db paper.pdf --overwrite
     """
-    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
+    embed_provider, embed_model, _ = _resolve_provider_model_options(
+        legacy=embed,
+        provider=embed_provider,
+        model=embed_model,
+        aliases=EMBED_ALIASES,
+        default_provider=DEFAULT_EMBED_PROVIDER,
+        default_model=DEFAULT_EMBED_MODEL,
+    )
     cfg = load_config(profile=profile, overrides={
-        "db": db, "table": table, "embed": embed,
+        "db": db,
+        "table": table,
+        "embed_provider": embed_provider,
+        "embed_model": embed_model,
         "chunk_method": chunk_method, "chunk_size": chunk_size, "chunk_overlap": chunk_overlap,
         "pdf_strategy": pdf_strategy,
     })
 
     if ctx.obj and ctx.obj.get("verbose"):
-        _print_config(cfg)
+        _print_ingest_config(cfg)
 
     try:
         result = ingestion_service.ingest(
@@ -215,14 +366,22 @@ def ingest(
 
     for source in result.skipped_files:
         console.print(f"[dim]  skipping {source} (already ingested)[/dim]")
+    for ignored in result.ignored_files:
+        console.print(
+            f"[yellow]  skipped {ignored.path.name}: {ignored.reason}"
+            f"{_ignored_file_hint(ignored.reason, ignored.path.name, cfg.chunk_method)}[/yellow]"
+        )
     for file_path, exc in result.failures:
         msg = str(exc)
         hint = "\n  Tip: use --chunk unstructured for .docx, .pptx, .xlsx and other Office formats." if "Unsupported file type" in msg else ""
         console.print(f"[yellow]  skipped {file_path.name}: {msg}{hint}[/yellow]")
 
     if result.rows_written == 0:
-        console.print("[yellow]All files already ingested — nothing to do.[/yellow]")
-        if result.mode == "vector":
+        if result.skipped_files and not result.ignored_files and not result.failures:
+            console.print("[yellow]All files already ingested — nothing to do.[/yellow]")
+        else:
+            console.print("[yellow]No files were ingested.[/yellow]")
+        if result.mode == "vector" and result.skipped_files:
             console.print("Use [bold]--overwrite[/bold] to force re-ingestion.")
         return
 
@@ -242,11 +401,34 @@ def ingest(
 
 
 @main.command()
+@_log_option(default=None)
 @click.argument("db")
 @click.argument("question")
 @click.option("--table", default="embeddings", show_default=True)
-@click.option("--embed", default=None, help="Embedding provider/model. Defaults to match --llm when possible.")
-@click.option("--llm", default="mistral", show_default=True, help="LLM provider/model (e.g. mistral, mistral-large, claude).")
+@click.option(
+    "--embed-provider",
+    default=None,
+    help="Embedding provider. Defaults to match the selected LLM provider when possible.",
+)
+@click.option(
+    "--embed-model",
+    default=None,
+    help="Embedding model. Defaults to the provider default when not inferred.",
+)
+@click.option(
+    "--llm-provider",
+    default=None,
+    show_default=DEFAULT_LLM_PROVIDER,
+    help="LLM provider.",
+)
+@click.option(
+    "--llm-model",
+    default=DEFAULT_LLM_MODEL,
+    show_default=True,
+    help="LLM model.",
+)
+@click.option("--embed", default=None, hidden=True, help="Legacy embedding provider/model shorthand.")
+@click.option("--llm", default=None, hidden=True, help="Legacy LLM provider/model shorthand.")
 @click.option("--top-k", default=5, show_default=True, help="Number of chunks to retrieve.")
 @click.option("--max-tokens", default=4096, show_default=True, help="Max tokens in the LLM response (increase if answers are cut off).")
 @click.option("--context", "-c", "show_context", is_flag=True, help="Print retrieved chunks before the answer.")
@@ -266,8 +448,12 @@ def ask(
     db: str,
     question: str,
     table: str,
-    embed: str,
-    llm: str,
+    embed_provider: str | None,
+    embed_model: str | None,
+    llm_provider: str,
+    llm_model: str,
+    embed: str | None,
+    llm: str | None,
     top_k: int,
     max_tokens: int,
     show_context: bool,
@@ -279,20 +465,55 @@ def ask(
     \b
     Examples:
       rag ask ./db "What is AFM?"
-      rag ask ./db "What is AFM?" --llm mistral --top-k 8 --context
+      rag ask ./db "What is AFM?" --llm-provider mistral --llm-model ministral-3b-2512 --top-k 8 --context
       rag ask ./db "What is AFM?" --stream
     """
-    llm = _fuzzy_option(llm, list(LLM_ALIASES), "llm")
-    if embed is None:
-        embed = _infer_embed_from_llm(llm)
-    embed = _fuzzy_option(embed, list(EMBED_ALIASES), "embed")
+    llm_provider, llm_model, _ = _resolve_provider_model_options(
+        legacy=llm,
+        provider=llm_provider,
+        model=llm_model,
+        aliases=LLM_ALIASES,
+        default_provider=DEFAULT_LLM_PROVIDER,
+        default_model=DEFAULT_LLM_MODEL,
+    )
+    if embed is None and embed_provider is None and embed_model is None:
+        embed_alias = _infer_embed_from_llm(f"{llm_provider}/{llm_model}")
+        embed_provider, embed_model = resolve_provider_model(
+            embed_alias,
+            EMBED_ALIASES,
+            DEFAULT_EMBED_PROVIDER,
+            DEFAULT_EMBED_MODEL,
+        )
+    else:
+        embed_provider, embed_model, _ = _resolve_provider_model_options(
+            legacy=embed,
+            provider=embed_provider,
+            model=embed_model,
+            aliases=EMBED_ALIASES,
+            default_provider=DEFAULT_EMBED_PROVIDER,
+            default_model=DEFAULT_EMBED_MODEL,
+        )
     cfg = load_config(profile=profile, overrides={
-        "db": db, "table": table, "embed": embed, "llm": llm,
+        "db": db,
+        "table": table,
+        "embed_provider": embed_provider,
+        "embed_model": embed_model,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
         "top_k": top_k, "max_tokens": max_tokens,
     })
 
     if ctx.obj and ctx.obj.get("verbose"):
-        _print_config(cfg)
+        _print_ask_config(cfg)
+
+    if _is_list_files_query(question):
+        adapter = get_db_adapter(cfg.db, cfg.table)
+        try:
+            sources = adapter.list_sources()
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc))
+        _print_sources_list(sources)
+        return
 
     try:
         retrieved = query_service.retrieve(cfg, question, progress=_service_progress)
@@ -300,7 +521,7 @@ def ask(
         msg = str(exc)
         if "query dim" in msg and "doesn't match" in msg:
             raise click.ClickException(
-                f"{msg}\nHint: make sure --embed matches the model used at ingest time."
+                f"{msg}\nHint: make sure the selected embed provider/model matches the model used at ingest time."
             )
         if isinstance(exc, RuntimeError):
             raise click.ClickException(msg)
@@ -349,6 +570,7 @@ def ask(
 
 
 @main.command("list")
+@_log_option(default=None)
 @click.argument("db")
 @click.option("--table", default="embeddings", show_default=True, help="Table name in the DB.")
 @click.option("--profile", default=None, help="Config profile from rag.toml to use.")
@@ -362,22 +584,17 @@ def list_cmd(ctx: click.Context, db: str, table: str, profile: str | None) -> No
       rag list s3://my-bucket/rag-db
       rag list postgres://user:pass@localhost/ragdb
     """
-    from rag.config import load_config
-    from rag.db import get_db_adapter
     cfg = load_config(profile=profile, overrides={"db": db, "table": table})
     adapter = get_db_adapter(cfg.db, cfg.table)
     try:
         sources = adapter.list_sources()
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
-    if not sources:
-        console.print("[dim]No files ingested yet.[/dim]")
-        return
-    for source in sources:
-        console.print(source)
+    _print_sources_list(sources)
 
 
 @main.command("gemini")
+@_log_option(default=None)
 @click.argument("path", type=click.Path(exists=True))
 @click.argument("question")
 @click.option("--model", default="gemini-2.5-flash", show_default=True, help="Gemini model (e.g. gemini-2.5-flash, gemini-2.5-pro).")
@@ -404,8 +621,12 @@ def gemini_cmd(path: str, question: str, model: str, gemini_mode: str, max_token
     src = Path(path)
     direct = GeminiFileApiClient(model=model)
     prepare_mode = cast(GeminiMode, gemini_mode.replace("-", "_").lower())
-    with console.status("Uploading files to Gemini..."):
-        prepared = direct.prepare(src, mode=prepare_mode)
+    with console.status("Uploading files to Gemini...") as status:
+        prepared = direct.prepare(
+            src,
+            mode=prepare_mode,
+            progress=lambda msg: status.update(f"Uploading files to Gemini... {msg}"),
+        )
     if prepared.uploaded_count == 0:
         raise click.ClickException(
             f"No supported files found under {path}. "
@@ -413,12 +634,15 @@ def gemini_cmd(path: str, question: str, model: str, gemini_mode: str, max_token
         )
     mode_label = "File Search" if prepared.mode == "file_search" else "Direct"
     console.print(f"Uploaded [bold]{prepared.uploaded_count}[/bold] file(s) via Gemini {mode_label}.")
+    if prepared.upload_summary:
+        console.print(f"[dim]{prepared.upload_summary}[/dim]")
     with console.status(f"Generating answer with [bold]{model}[/bold]..."):
         answer = direct.ask_prepared(question, prepared, max_tokens=max_tokens)
     console.print(Markdown(answer))
 
 
 @main.command("gui")
+@_log_option(default=None)
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host interface to bind.")
 @click.option("--port", default=7860, show_default=True, help="Port to listen on.")
 @click.option("--no-browser", is_flag=True, help="Do not open the GUI in a browser automatically.")

@@ -80,7 +80,7 @@ Useful targets:
 
 ```bash
 rag ingest ./db ./docs/
-rag ingest ./db paper.pdf --embed mistral --chunk-size 800
+rag ingest ./db paper.pdf --embed-provider mistral --embed-model mistral-embed --chunk-size 800
 ```
 
 **List** ingested files:
@@ -94,7 +94,7 @@ rag list s3://my-bucket/rag-db
 
 ```bash
 rag ask ./db "What are the responsible AI principles?"
-rag -q ask ./db "What is AFM?" --llm claude --top-k 8 --context
+rag -q ask ./db "What is AFM?" --llm-provider anthropic --llm-model claude-sonnet-4-5 --top-k 8 --context
 rag ask ./db "list files"
 ```
 
@@ -116,7 +116,8 @@ Extension points:
 
 ## Embedding providers
 
-Pass `--embed <provider>` to `ingest` and `ask` (must match):
+Pass `--embed-provider` and `--embed-model` to `ingest` and `ask`.
+If you only set `--embed-model`, the CLI will infer the provider when it can:
 
 | Alias      | Provider  | Model                    | Key needed          | Status |
 |------------|-----------|--------------------------|---------------------|--------|
@@ -126,7 +127,7 @@ Pass `--embed <provider>` to `ingest` and `ask` (must match):
 | `gemini`   | Google    | gemini-embedding-001     | `GEMINI_API_KEY`    | ✅     |
 | `bedrock`  | AWS       | cohere.embed-english-v3      | AWS credentials | ✅     |
 
-You can also specify a model directly: `--embed voyageai/voyage-3.5` or `--embed openai/text-embedding-3-large`
+You can also specify a model directly: `--embed-model voyage-3.5-lite` or `--embed-model openai/text-embedding-3-large`
 
 Install the extra for your chosen provider:
 
@@ -141,17 +142,22 @@ pip install -e ".[bedrock]"   # AWS Bedrock
 
 ## LLM providers
 
-Pass `--llm <provider>` to `ask`:
+Pass `--llm-provider` and `--llm-model` to `ask`.
+If you only set `--llm-model`, the CLI will infer the provider when it can:
 
 | Alias       | Model                    | Key needed           | Status |
 |-------------|--------------------------|----------------------|--------|
 | `mistral`   | ministral-3b-2512        | `MISTRAL_API_KEY`    | ✅     |
 | `claude`    | claude-haiku-4-5         | `ANTHROPIC_API_KEY`  | ✅     |
+| `claude-sonnet-4-5` | claude-sonnet-4-5 | `ANTHROPIC_API_KEY` | ✅ |
 | `openai`    | gpt-4o                   | `OPENAI_API_KEY`     | ✅     |
+| `gpt-5.4`   | gpt-5.4                  | `OPENAI_API_KEY`     | ✅     |
 | `gemini`    | gemini-2.5-flash         | `GEMINI_API_KEY`     | ✅     |
 | `bedrock`   | amazon.nova-lite-v1:0    | AWS credentials      | ✅     |
 
-Or specify a model directly: `--llm mistral/open-mistral-nemo`
+OpenAI also accepts `gpt-5.4-mini` and `gpt-5.4-nano`; those resolve to the current official mini/nano model IDs in the code.
+
+Or specify a model directly: `--llm-model open-mistral-nemo`
 
 Install the extra for your chosen provider:
 
@@ -168,7 +174,7 @@ Streaming is enabled by default in `ask`, so answers appear token-by-token as th
 
 ```bash
 rag ask ./db "Summarise the key findings"
-rag ask ./db "Summarise the key findings" --llm claude
+rag ask ./db "Summarise the key findings" --llm-provider anthropic --llm-model claude-sonnet-4-5
 ```
 
 Use `--no-stream` if you prefer waiting for the full answer rendered as markdown (bold, code blocks, lists, etc.):
@@ -314,17 +320,18 @@ rag ask    postgres://$(whoami)@localhost/ragdb "What is AFM?"
 | Option      | Description                                      |
 |-------------|--------------------------------------------------|
 | `--table`   | Table name (default: `embeddings`)               |
-| `--embed`   | Embedding provider — must match at ingest/ask    |
+| `--embed-provider` / `--embed-model`   | Embedding provider/model — must match at ingest/ask    |
 | `--top-k`   | Chunks to retrieve (default: 5)                  |
 
 Example with all options:
 
 ```bash
 rag ingest 'postgres://user:pass@localhost/ragdb?admin_db=postgres' ./docs/ \
-  --table my_docs --embed voyage --chunk-size 600
+  --table my_docs --embed-provider voyageai --embed-model voyage-3.5-lite --chunk-size 600
 
 rag ask 'postgres://user:pass@localhost/ragdb' "What is AFM?" \
-  --table my_docs --embed voyage --llm claude --top-k 8
+  --table my_docs --embed-provider voyageai --embed-model voyage-3.5-lite \
+  --llm-provider anthropic --llm-model claude-sonnet-4-5 --top-k 8
 ```
 
 ### Weaviate backend
@@ -372,7 +379,7 @@ Use the Weaviate URI as your DB and keep your embedding provider consistent betw
 1. Ingest documents:
 
 ```bash
-rag ingest weaviate://localhost:8080 ./docs/ --embed mistral
+rag ingest weaviate://localhost:8080 ./docs/ --embed-provider mistral --embed-model mistral-embed
 ```
 
 2. Confirm what was ingested:
@@ -385,7 +392,8 @@ rag list weaviate://localhost:8080
 
 ```bash
 rag ask weaviate://localhost:8080 "What are the responsible AI principles?" \
-  --embed mistral --llm claude --top-k 5
+  --embed-provider mistral --embed-model mistral-embed \
+  --llm-provider anthropic --llm-model claude-sonnet-4-5 --top-k 5
 ```
 
 4. Optional shorthand (uses default `./db`, so not for Weaviate):
@@ -413,8 +421,10 @@ Defaults can be set in `./rag.toml` or `~/.rag.toml`:
 
 ```toml
 [defaults]
-embed = "mistral"
-llm   = "claude"
+embed-provider = "mistral"
+embed-model = "mistral-embed"
+llm-provider = "anthropic"
+llm-model = "claude-sonnet-4-5"
 top_k = 8
 ```
 
@@ -423,13 +433,17 @@ Named profiles let you switch between setups with a single flag:
 ```toml
 [profiles.work]
 db    = "postgres://user:pass@prod-host/ragdb"
-embed = "voyage"
-llm   = "claude"
+embed-provider = "voyageai"
+embed-model = "voyage-3.5-lite"
+llm-provider = "anthropic"
+llm-model = "claude-sonnet-4-5"
 
 [profiles.local]
 db    = "./db"
-embed = "mistral"
-llm   = "mistral"
+embed-provider = "mistral"
+embed-model = "mistral-embed"
+llm-provider = "mistral"
+llm-model = "ministral-3b-2512"
 ```
 
 Activate a profile with `--profile`:
@@ -439,10 +453,10 @@ rag ingest --profile work ./docs/
 rag ask    --profile work "What is the policy on X?"
 
 # Profile values are overridden by explicit flags:
-rag ask --profile work --llm openai "What is the policy on X?"
+rag ask --profile work --llm-provider openai --llm-model gpt-5.4 "What is the policy on X?"
 ```
 
-**Precedence (low → high):** `~/.rag.toml` < `./rag.toml` < `--profile` < CLI flags < env vars (`RAG_LLM`, `RAG_EMBED`, `RAG_DB`, etc.)
+**Precedence (low → high):** `~/.rag.toml` < `./rag.toml` < `--profile` < CLI flags < env vars (`RAG_LLM`, `RAG_LLM_PROVIDER`, `RAG_LLM_MODEL`, `RAG_EMBED`, `RAG_EMBED_PROVIDER`, `RAG_EMBED_MODEL`, `RAG_DB`, etc.)
 
 ---
 
@@ -462,10 +476,10 @@ Use Gemini for **generation** and/or **embeddings** with your existing local or 
 
 ```bash
 # Embed with Gemini, store in LanceDB
-rag ingest ./db ./docs/ --embed gemini
+rag ingest ./db ./docs/ --embed-provider gemini --embed-model gemini-embedding-001
 
 # Generate with Gemini (retrieve from existing DB)
-rag ask ./db "What is AFM?" --llm gemini
+rag ask ./db "What is AFM?" --llm-provider gemini --llm-model gemini-2.5-flash
 ```
 
 ### Gemini API
@@ -515,8 +529,8 @@ Full managed RAG: Vertex handles chunking, embedding, and retrieval; you use a p
 # Ingest: uploads files to Vertex; Vertex chunks and embeds
 rag ingest vertex://my-gcp-project/my-corpus ./docs/
 
-# Ask: retrieves from corpus and generates with Gemini (use --llm gemini)
-rag ask vertex://my-gcp-project/my-corpus "What is AFM?" --llm gemini
+# Ask: retrieves from corpus and generates with Gemini (use --llm-provider gemini --llm-model gemini-2.5-flash)
+rag ask vertex://my-gcp-project/my-corpus "What is AFM?" --llm-provider gemini --llm-model gemini-2.5-flash
 ```
 
 Vertex ingest supports the same basic file types as local ingest (`.pdf`, `.txt`, `.md`). For ask with Vertex, you can omit `--embed`; retrieval uses Vertex's own embedding.
@@ -563,7 +577,7 @@ The Knowledge Base ID is shown on the KB overview page in the AWS Console (e.g. 
 rag ingest bedrock-kb://ABCDE12345 ./docs/
 
 # Ask: retrieves via KB Retrieve API, generates with Bedrock LLM
-rag ask bedrock-kb://ABCDE12345 "What is AFM?" --llm bedrock
+rag ask bedrock-kb://ABCDE12345 "What is AFM?" --llm-provider bedrock --llm-model amazon.nova-lite-v1:0
 ```
 
 No `--embed` flag needed — the KB uses the embedding model configured at creation time.
@@ -602,10 +616,11 @@ pip install -e ".[bedrock]"
 
 ```bash
 # Ingest: embed with Bedrock model, store in LanceDB on S3
-rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock
+rag ingest s3://my-bucket/rag-db ./docs/ --embed-provider bedrock --embed-model cohere.embed-english-v3
 
 # Ask: embed query and use LLM, all from Bedrock
-rag ask s3://my-bucket/rag-db "What is AFM?" --embed bedrock --llm bedrock
+rag ask s3://my-bucket/rag-db "What is AFM?" --embed-provider bedrock --embed-model cohere.embed-english-v3 \
+  --llm-provider bedrock --llm-model amazon.nova-lite-v1:0
 ```
 
 The `--embed` provider must match between `ingest` and `ask`.
@@ -618,8 +633,8 @@ The `--embed` provider must match between `ingest` and `ask`.
 | `amazon.titan-embed-text-v2:0` | 1024 | Good alternative; native AWS model |
 
 ```bash
-rag ingest s3://my-bucket/rag-db ./docs/ --embed bedrock/amazon.titan-embed-text-v2:0
-rag ask    s3://my-bucket/rag-db "What is AFM?" --embed bedrock/amazon.titan-embed-text-v2:0 --llm bedrock
+rag ingest s3://my-bucket/rag-db ./docs/ --embed-provider bedrock --embed-model amazon.titan-embed-text-v2:0
+rag ask    s3://my-bucket/rag-db "What is AFM?" --embed-provider bedrock --embed-model amazon.titan-embed-text-v2:0 --llm-provider bedrock --llm-model amazon.nova-lite-v1:0
 ```
 
 #### LLM models
@@ -633,7 +648,7 @@ The default is `amazon.nova-lite-v1:0`. The Bedrock adapter uses the [Converse A
 | `anthropic.claude-sonnet-4-5-20250514-v1:0` | Strong instruction-following and citation quality |
 
 ```bash
-rag ask s3://my-bucket/rag-db "Summarise findings" --llm bedrock/amazon.nova-pro-v1:0
+rag ask s3://my-bucket/rag-db "Summarise findings" --llm-provider bedrock --llm-model amazon.nova-pro-v1:0
 ```
 
 #### Profile example
@@ -660,17 +675,20 @@ Complete reference of all configurable providers, models, and strategies:
 
 | Category | Option | Alias | Provider | Default Model | API Key | Extra Install |
 |----------|--------|-------|----------|---------------|---------|----------------|
-| **Embedding** | `--embed mistral` | `mistral` | Mistral | `mistral-embed` | `MISTRAL_API_KEY` | — |
-| | `--embed voyage` | `voyage` / `voyageai` | VoyageAI | `voyage-3.5-lite` | `VOYAGE_API_KEY` | `[voyageai]` |
-| | `--embed openai` | `openai` | OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | `[openai]` |
-| | `--embed gemini` | `gemini` | Google | `gemini-embedding-001` | `GEMINI_API_KEY` | `[gemini]` |
-| | `--embed bedrock` | `bedrock` | AWS Bedrock | `cohere.embed-english-v3` | AWS credentials | `[bedrock]` |
-| **LLM** | `--llm mistral` | `mistral` | Mistral | `ministral-3b-2512` | `MISTRAL_API_KEY` | — |
-| | `--llm mistral-large` | `mistral-large` | Mistral | `mistral-large-2512` | `MISTRAL_API_KEY` | — |
-| | `--llm claude` | `claude` / `anthropic` | Anthropic | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` | `[anthropic]` |
-| | `--llm gpt-4o` | `openai` | OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
-| | `--llm gemini` | `gemini` | Google | `gemini-2.5-flash` | `GEMINI_API_KEY` | `[gemini]` |
-| | `--llm bedrock` | `bedrock` | AWS Bedrock | `amazon.nova-lite-v1:0` | AWS credentials | `[bedrock]` |
+| **Embedding** | `--embed-provider mistral` + `--embed-model mistral-embed` | `mistral` | Mistral | `mistral-embed` | `MISTRAL_API_KEY` | — |
+| | `--embed-provider voyageai` + `--embed-model voyage-3.5-lite` | `voyage` / `voyageai` | VoyageAI | `voyage-3.5-lite` | `VOYAGE_API_KEY` | `[voyageai]` |
+| | `--embed-provider openai` + `--embed-model text-embedding-3-small` | `openai` | OpenAI | `text-embedding-3-small` | `OPENAI_API_KEY` | `[openai]` |
+| | `--embed-provider gemini` + `--embed-model gemini-embedding-001` | `gemini` | Google | `gemini-embedding-001` | `GEMINI_API_KEY` | `[gemini]` |
+| | `--embed-provider bedrock` + `--embed-model cohere.embed-english-v3` | `bedrock` | AWS Bedrock | `cohere.embed-english-v3` | AWS credentials | `[bedrock]` |
+| **LLM** | `--llm-provider mistral` + `--llm-model ministral-3b-2512` | `mistral` | Mistral | `ministral-3b-2512` | `MISTRAL_API_KEY` | — |
+| | `--llm-provider mistral` + `--llm-model mistral-large-2512` | `mistral-large` | Mistral | `mistral-large-2512` | `MISTRAL_API_KEY` | — |
+| | `--llm-provider anthropic` + `--llm-model claude-sonnet-4-5` | `claude` / `anthropic` / `claude-sonnet-4-5` | Anthropic | `claude-sonnet-4-5` | `ANTHROPIC_API_KEY` | `[anthropic]` |
+| | `--llm-provider openai` + `--llm-model gpt-4o` | `openai` | OpenAI | `gpt-4o` | `OPENAI_API_KEY` | `[openai]` |
+| | `--llm-provider openai` + `--llm-model gpt-5.4` | `gpt-5.4` | OpenAI | `gpt-5.4` | `OPENAI_API_KEY` | `[openai]` |
+| | `--llm-provider openai` + `--llm-model gpt-5.4-mini` | `gpt-5.4-mini` | OpenAI | `gpt-5-mini-2025-08-07` | `OPENAI_API_KEY` | `[openai]` |
+| | `--llm-provider openai` + `--llm-model gpt-5.4-nano` | `gpt-5.4-nano` | OpenAI | `gpt-5-nano-2025-08-07` | `OPENAI_API_KEY` | `[openai]` |
+| | `--llm-provider gemini` + `--llm-model gemini-2.5-flash` | `gemini` | Google | `gemini-2.5-flash` | `GEMINI_API_KEY` | `[gemini]` |
+| | `--llm-provider bedrock` + `--llm-model amazon.nova-lite-v1:0` | `bedrock` | AWS Bedrock | `amazon.nova-lite-v1:0` | AWS credentials | `[bedrock]` |
 | **Chunking** | `--chunk basic` | `basic` | Default | — | — | — |
 | | `--chunk unstructured` | `unstructured` | Unstructured | — | — | `[unstructured]` |
 | **PDF Strategy** | `--pdf-strategy fast` | `fast` | Unstructured | — | — | `[unstructured]` |
@@ -685,7 +703,8 @@ Complete reference of all configurable providers, models, and strategies:
 | **AWS Bedrock** | `s3://bucket/path` (DB) | — | LanceDB on S3 | — | AWS credentials | `[bedrock]` |
 
 **Notes:**
-- Custom models can be specified with `provider/model` syntax: `--embed voyageai/voyage-3.5` or `--llm openai/gpt-4-turbo`
-- Embedding provider and model must match between `ingest` and `ask` commands
-- Default values are set in `RagConfig` with `--profile`, config files, or environment variables
+- You can now split provider and model explicitly with `--embed-provider` / `--embed-model` and `--llm-provider` / `--llm-model`.
+- Custom models can still be specified with `provider/model` syntax on the legacy combined flags, but the split flags are the preferred form.
+- Embedding provider and model must match between `ingest` and `ask` commands.
+- Default values are set in `RagConfig` with `--profile`, config files, or environment variables.
 - See [Document chunking](#document-chunking) for chunking strategies and [Database backends](#database-backends) for storage options
