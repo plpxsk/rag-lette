@@ -39,6 +39,12 @@ class Chunk:
     heading: str = field(default="")
 
 
+@dataclass(frozen=True)
+class IgnoredPath:
+    path: Path
+    reason: str
+
+
 def chunk_file(
     path: Path,
     chunk_size: int = 1000,
@@ -67,17 +73,38 @@ def list_chunkable_files(
     skip_extensions: set[str] | None = None,
 ) -> list[Path]:
     """Return sorted list of files in directory that can be chunked."""
+    return discover_chunkable_files(directory, chunk_method, skip_extensions)[0]
+
+
+def discover_chunkable_files(
+    directory: Path,
+    chunk_method: str = "basic",
+    skip_extensions: set[str] | None = None,
+) -> tuple[list[Path], list[IgnoredPath]]:
+    """Return (selected_files, ignored_files) for a directory ingest scan."""
     supported = UNSTRUCTURED_EXTENSIONS if chunk_method == "unstructured" else BASIC_EXTENSIONS
     skip = {
         e.lower() if e.startswith(".") else f".{e.lower()}"
         for e in (skip_extensions or set())
     }
-    return [
-        p for p in sorted(directory.iterdir())
-        if p.is_file() and not p.name.startswith(".")
-        and p.suffix.lower() in supported
-        and p.suffix.lower() not in skip
-    ]
+    selected: list[Path] = []
+    ignored: list[IgnoredPath] = []
+    for path in sorted(directory.iterdir()):
+        if not path.is_file():
+            continue
+        if path.name.startswith("."):
+            ignored.append(IgnoredPath(path, "hidden file"))
+            continue
+        suffix = path.suffix.lower()
+        if suffix in skip:
+            ignored.append(IgnoredPath(path, f"skipped by extension filter ({suffix})"))
+            continue
+        if suffix not in supported:
+            label = suffix or "no extension"
+            ignored.append(IgnoredPath(path, f"unsupported file type ({label})"))
+            continue
+        selected.append(path)
+    return selected, ignored
 
 
 def chunk_directory(
