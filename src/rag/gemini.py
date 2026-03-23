@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from rag.generate import _build_prompt
+
 if TYPE_CHECKING:
     from google.genai import types as genai_types
 
@@ -34,6 +36,9 @@ class GeminiPreparedContext:
     uploaded_count: int
     files: list[genai_types.File] | None = None
     file_search_store_name: str | None = None
+
+
+GeminiMode = Literal["auto", "direct", "file_search"]
 
 
 class GeminiFileApiClient:
@@ -90,7 +95,7 @@ class GeminiFileApiClient:
         from google.genai import types
         if not files:
             raise ValueError("No files provided; upload files first.")
-        contents: list[Any] = [_build_prompt(question)]
+        contents: list[Any] = [_build_prompt(question, ())]
         contents.extend(files)
         config_kwargs: dict[str, int] = {}
         if max_tokens is not None:
@@ -102,14 +107,24 @@ class GeminiFileApiClient:
         )
         return response.text or ""
 
-    def prepare(self, path: Path) -> GeminiPreparedContext:
+    def prepare(self, path: Path, mode: GeminiMode = "auto") -> GeminiPreparedContext:
         files_to_consider = self._collect_supported_files(path)
         if not files_to_consider:
             return GeminiPreparedContext(mode="direct", uploaded_count=0, files=[])
+        if mode == "direct":
+            direct_files = [
+                p for p in files_to_consider if p.suffix.lower() in GEMINI_DIRECT_EXTENSIONS
+            ]
+            uploaded = [self._upload_one(p) for p in direct_files]
+            return GeminiPreparedContext(
+                mode="direct",
+                uploaded_count=len(uploaded),
+                files=uploaded,
+            )
         has_file_search_extension = any(
             p.suffix.lower() in GEMINI_FILE_SEARCH_EXTENSIONS for p in files_to_consider
         )
-        if has_file_search_extension:
+        if mode == "file_search" or has_file_search_extension:
             store_name = self._upload_to_file_search_store(files_to_consider)
             return GeminiPreparedContext(
                 mode="file_search",
@@ -178,7 +193,7 @@ class GeminiFileApiClient:
             config_kwargs["max_output_tokens"] = max_tokens
         response = self.client.models.generate_content(
             model=self.model,
-            contents=_build_prompt(question),
+            contents=_build_prompt(question, ()),
             config=types.GenerateContentConfig(**config_kwargs),
         )
         return response.text or ""
@@ -222,14 +237,3 @@ class GeminiFileApiClient:
 
 
 GeminiDirect = GeminiFileApiClient
-
-
-def _build_prompt(query: str) -> str:
-    return (
-        "Answer the query using only the context provided below. "
-        "Quote relevant passages to support your answer. "
-        "Treat the source filename attached to each chunk as retrieval metadata, not as a claim. "
-        "If the context does not contain enough information, say so.\n\n"
-        "<context>\n\n</context>\n\n"
-        f"<query>{query}</query>"
-    )

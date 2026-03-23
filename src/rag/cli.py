@@ -5,6 +5,7 @@ import difflib
 import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.console import Console
@@ -13,7 +14,7 @@ from rich.rule import Rule
 
 from rag.config import EMBED_ALIASES, LLM_ALIASES, load_config
 from rag.db import QueryChunk
-from rag.gemini import GeminiFileApiClient
+from rag.gemini import GeminiFileApiClient, GeminiMode
 from rag.generate import generate, generate_stream
 from rag.services import IngestionService, QueryService, RetrievalResult
 
@@ -380,8 +381,15 @@ def list_cmd(ctx: click.Context, db: str, table: str, profile: str | None) -> No
 @click.argument("path", type=click.Path(exists=True))
 @click.argument("question")
 @click.option("--model", default="gemini-2.5-flash", show_default=True, help="Gemini model (e.g. gemini-2.5-flash, gemini-2.5-pro).")
+@click.option(
+    "--gemini-mode",
+    default="auto",
+    show_default=True,
+    type=click.Choice(["auto", "direct", "file-search"], case_sensitive=False),
+    help="Route mode: auto-detect, force direct upload, or force file search.",
+)
 @click.option("--max-tokens", default=1024, show_default=True)
-def gemini_cmd(path: str, question: str, model: str, max_tokens: int) -> None:
+def gemini_cmd(path: str, question: str, model: str, gemini_mode: str, max_tokens: int) -> None:
     """Ask a question using Gemini direct mode or File Search mode.
 
     Routes to Gemini File Search when Office files are present, otherwise uses
@@ -395,8 +403,9 @@ def gemini_cmd(path: str, question: str, model: str, max_tokens: int) -> None:
     """
     src = Path(path)
     direct = GeminiFileApiClient(model=model)
+    prepare_mode = cast(GeminiMode, gemini_mode.replace("-", "_").lower())
     with console.status("Uploading files to Gemini..."):
-        prepared = direct.prepare(src)
+        prepared = direct.prepare(src, mode=prepare_mode)
     if prepared.uploaded_count == 0:
         raise click.ClickException(
             f"No supported files found under {path}. "

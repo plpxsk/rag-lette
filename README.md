@@ -96,6 +96,8 @@ rag ask ./db "What are the responsible AI principles?"
 rag -q ask ./db "What is AFM?" --llm claude --top-k 8 --context
 ```
 
+`ask` now appends a per-query `Sources` footer with filename counts when the active backend returns source metadata for retrieved chunks. If a backend cannot expose filenames for retrieval results, the footer is omitted quietly.
+
 **Shorthand** — ask against `./db` without subcommands:
 
 ```bash

@@ -220,6 +220,10 @@ def _append_message(
     return [*history, {"role": role, "content": content}]
 
 
+def _prefer(primary: str, fallback: str) -> str:
+    return primary.strip() or fallback.strip()
+
+
 def _format_ingestion_result(result: IngestionResult, cfg: RagConfig, verbose: bool) -> str:
     lines: list[str] = []
     if result.rows_written == 0:
@@ -587,7 +591,6 @@ def create_demo(root_dir: str | Path | None = None):
         verbose: bool,
         log_level: str,
         mistral_api_key: str,
-        anthropic_api_key: str,
         openai_api_key: str,
         gemini_api_key: str,
         voyage_api_key: str,
@@ -597,6 +600,10 @@ def create_demo(root_dir: str | Path | None = None):
         aws_session_token: str,
         aws_default_region: str,
         google_application_credentials: str,
+        anthropic_api_key: str,
+        mistral_query_api_key: str,
+        openai_query_api_key: str,
+        gemini_query_api_key: str,
     ):
         if not message.strip():
             yield "", history, history, "Ask a question to begin.", ""
@@ -605,10 +612,10 @@ def create_demo(root_dir: str | Path | None = None):
         _apply_log_level(log_level)
         _set_runtime_credentials(
             {
-                "MISTRAL_API_KEY": mistral_api_key,
+                "MISTRAL_API_KEY": _prefer(mistral_query_api_key, mistral_api_key),
                 "ANTHROPIC_API_KEY": anthropic_api_key,
-                "OPENAI_API_KEY": openai_api_key,
-                "GEMINI_API_KEY": gemini_api_key,
+                "OPENAI_API_KEY": _prefer(openai_query_api_key, openai_api_key),
+                "GEMINI_API_KEY": _prefer(gemini_query_api_key, gemini_api_key),
                 "VOYAGE_API_KEY": voyage_api_key,
                 "WEAVIATE_API_KEY": weaviate_api_key,
                 "AWS_ACCESS_KEY_ID": aws_access_key_id,
@@ -747,8 +754,17 @@ def create_demo(root_dir: str | Path | None = None):
             """
         )
 
-        with gr.Sidebar(open=False):
-            with gr.Accordion("Database", open=True):
+        with gr.Sidebar(open=True):
+            with gr.Accordion("1. Select Files to Ingest", open=True):
+                ingest_selection = gr.FileExplorer(
+                    label="File or Folder",
+                    root_dir=str(browser_root),
+                    file_count="single",
+                    glob="**/*",
+                )
+                ingest_button = gr.Button("Ingest into Selected DB", variant="primary")
+
+            with gr.Accordion("2. Choose Database", open=True):
                 db_provider = gr.Dropdown(
                     choices=DB_PROVIDER_CHOICES,
                     value=None,
@@ -789,20 +805,7 @@ def create_demo(root_dir: str | Path | None = None):
                     info="Optional profile from rag.toml.",
                 )
 
-            with gr.Accordion("Models", open=False):
-                llm_choice = gr.Dropdown(
-                    choices=LLM_CHOICES,
-                    value="mistral",
-                    label="LLM",
-                )
-                llm_custom_provider = gr.Textbox(
-                    label="Custom LLM Provider",
-                    visible=False,
-                )
-                llm_custom_model = gr.Textbox(
-                    label="Custom LLM Model",
-                    visible=False,
-                )
+            with gr.Accordion("3. Embeddings", open=False):
                 embed_choice = gr.Dropdown(
                     choices=EMBED_CHOICES,
                     value="mistral",
@@ -817,7 +820,7 @@ def create_demo(root_dir: str | Path | None = None):
                     visible=False,
                 )
 
-            with gr.Accordion("Ingest Settings", open=False):
+            with gr.Accordion("4. Ingest Settings", open=False):
                 chunk_method = gr.Dropdown(
                     choices=["basic", "unstructured"],
                     value="basic",
@@ -838,23 +841,8 @@ def create_demo(root_dir: str | Path | None = None):
                 )
                 overwrite = gr.Checkbox(label="Overwrite Existing Sources", value=False)
 
-            with gr.Accordion("Query Settings", open=False):
-                top_k = gr.Number(label="Top K", value=5, precision=0)
-                max_tokens = gr.Number(label="Max Tokens", value=4096, precision=0)
-                show_context = gr.Checkbox(label="Show Retrieved Context", value=False)
-                stream = gr.Checkbox(label="Stream Responses", value=True)
-
-            with gr.Accordion("App Settings", open=False):
-                verbose = gr.Checkbox(label="Verbose Config Summary", value=False)
-                log_level = gr.Dropdown(
-                    choices=LOG_LEVELS,
-                    value="WARNING",
-                    label="Log Level",
-                )
-
-            with gr.Accordion("Credentials", open=False):
+            with gr.Accordion("5. Ingest Credentials", open=False):
                 mistral_api_key = gr.Textbox(label="Mistral API Key", type="password")
-                anthropic_api_key = gr.Textbox(label="Anthropic API Key", type="password")
                 openai_api_key = gr.Textbox(label="OpenAI API Key", type="password")
                 gemini_api_key = gr.Textbox(label="Gemini API Key", type="password")
                 voyage_api_key = gr.Textbox(label="Voyage API Key", type="password")
@@ -866,6 +854,14 @@ def create_demo(root_dir: str | Path | None = None):
                 google_application_credentials = gr.Textbox(
                     label="GOOGLE_APPLICATION_CREDENTIALS",
                     info="Path to a service account JSON file if you are not using gcloud ADC.",
+                )
+
+            with gr.Accordion("6. App Settings", open=False):
+                verbose = gr.Checkbox(label="Verbose Config Summary", value=False)
+                log_level = gr.Dropdown(
+                    choices=LOG_LEVELS,
+                    value="WARNING",
+                    label="Log Level",
                 )
 
         with gr.Tab("RAG Workspace"):
@@ -884,6 +880,53 @@ def create_demo(root_dir: str | Path | None = None):
                             "embeddings",
                         )
                     )
+                    with gr.Accordion("Generation Model", open=False):
+                        llm_choice = gr.Dropdown(
+                            choices=LLM_CHOICES,
+                            value="mistral",
+                            label="LLM",
+                        )
+                        llm_custom_provider = gr.Textbox(
+                            label="Custom LLM Provider",
+                            visible=False,
+                        )
+                        llm_custom_model = gr.Textbox(
+                            label="Custom LLM Model",
+                            visible=False,
+                        )
+                    with gr.Accordion("Query Settings", open=False):
+                        top_k = gr.Number(label="Top K", value=5, precision=0)
+                        max_tokens = gr.Number(label="Max Tokens", value=4096, precision=0)
+                        show_context = gr.Checkbox(label="Show Retrieved Context", value=False)
+                        stream = gr.Checkbox(label="Stream Responses", value=True)
+                        anthropic_api_key = gr.Textbox(label="Anthropic API Key", type="password")
+                        mistral_query_api_key = gr.Textbox(
+                            label="Mistral API Key Override",
+                            type="password",
+                            info="Optional. Uses the sidebar value if left blank.",
+                        )
+                        openai_query_api_key = gr.Textbox(
+                            label="OpenAI API Key Override",
+                            type="password",
+                            info="Optional. Uses the sidebar value if left blank.",
+                        )
+                        gemini_query_api_key = gr.Textbox(
+                            label="Gemini API Key Override",
+                            type="password",
+                            info="Optional. Uses the sidebar value if left blank.",
+                        )
+                    with gr.Row():
+                        refresh_button = gr.Button("Refresh Ingested Files")
+                    source_table = gr.Dataframe(
+                        headers=["Ingested Files"],
+                        datatype=["str"],
+                        value=[],
+                        interactive=False,
+                        row_count=(0, "dynamic"),
+                        col_count=(1, "fixed"),
+                        wrap=True,
+                        label="Loaded Sources",
+                    )
                     rag_chatbot = gr.Chatbot(
                         label="Document Chat",
                         height=680,
@@ -896,29 +939,21 @@ def create_demo(root_dir: str | Path | None = None):
                     with gr.Row():
                         rag_send = gr.Button("Ask", variant="primary")
                         rag_clear = gr.Button("Clear Chat")
-
-                with gr.Column(scale=3):
-                    ingest_selection = gr.FileExplorer(
-                        label="Select File or Folder to Ingest",
-                        root_dir=str(browser_root),
-                        file_count="single",
-                        glob="**/*",
-                    )
-                    with gr.Row():
-                        ingest_button = gr.Button("Ingest", variant="primary")
-                        refresh_button = gr.Button("Refresh Sources")
-                    source_table = gr.Dataframe(
-                        headers=["Ingested Files"],
-                        datatype=["str"],
-                        value=[],
-                        interactive=False,
-                        row_count=(0, "dynamic"),
-                        col_count=(1, "fixed"),
-                        wrap=True,
-                    )
-                    rag_status = gr.Markdown("Ready.")
+                    rag_status = gr.Markdown("Choose a database, ingest files, then ask questions.")
                     with gr.Accordion("Retrieved Context", open=False):
                         rag_context = gr.Markdown("Retrieved context will appear here.")
+
+                with gr.Column(scale=3):
+                    gr.Markdown(
+                        """
+                        ### Workflow
+                        1. Pick files in the sidebar.
+                        2. Choose or define a database.
+                        3. Ingest content.
+                        4. Refresh loaded sources if needed.
+                        5. Ask questions here.
+                        """
+                    )
 
         with gr.Tab("Gemini Direct"):
             with gr.Row(equal_height=False):
@@ -1061,7 +1096,7 @@ def create_demo(root_dir: str | Path | None = None):
             top_k,
             max_tokens,
         ]
-        credential_inputs = [
+        ingest_credential_inputs = [
             mistral_api_key,
             anthropic_api_key,
             openai_api_key,
@@ -1074,6 +1109,22 @@ def create_demo(root_dir: str | Path | None = None):
             aws_default_region,
             google_application_credentials,
         ]
+        rag_credential_inputs = [
+            mistral_api_key,
+            openai_api_key,
+            gemini_api_key,
+            voyage_api_key,
+            weaviate_api_key,
+            aws_access_key_id,
+            aws_secret_access_key,
+            aws_session_token,
+            aws_default_region,
+            google_application_credentials,
+            anthropic_api_key,
+            mistral_query_api_key,
+            openai_query_api_key,
+            gemini_query_api_key,
+        ]
 
         ingest_button.click(
             ingest_files,
@@ -1084,7 +1135,7 @@ def create_demo(root_dir: str | Path | None = None):
                 overwrite,
                 verbose,
                 log_level,
-                *credential_inputs,
+                *ingest_credential_inputs,
             ],
             outputs=[source_table, rag_status, current_db],
         )
@@ -1097,7 +1148,7 @@ def create_demo(root_dir: str | Path | None = None):
             stream,
             verbose,
             log_level,
-            *credential_inputs,
+            *rag_credential_inputs,
         ]
         rag_submit_outputs = [
             rag_message,
