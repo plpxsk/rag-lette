@@ -8,7 +8,7 @@ Mix and match embeddings, LLMs, and storage — all from the CLI, no code requir
 
 - **Embeddings:** Mistral · VoyageAI · OpenAI · Gemini · AWS Bedrock
 - **LLMs:** Mistral · Claude · GPT-4o · Gemini · AWS Bedrock
-- **Storage:** LanceDB (local) · Postgres/pgvector · S3 · Vertex AI RAG Engine · Bedrock Knowledge Bases
+- **Storage:** LanceDB (local) · Postgres/pgvector · Weaviate · S3 · Vertex AI RAG Engine · Bedrock Knowledge Bases
 - **Parsing:** PDF, DOCX, PPTX, XLSX, and more via `basic` or `unstructured` chunkers
 
 ## Architecture
@@ -72,6 +72,7 @@ Useful targets:
 
 - `make test` - run tests
 - `make test-cov` - run tests with coverage summary
+- `make weaviate` - start local Weaviate container (`rag-weaviate`)
 
 ## Basic usage
 
@@ -94,9 +95,12 @@ rag list s3://my-bucket/rag-db
 ```bash
 rag ask ./db "What are the responsible AI principles?"
 rag -q ask ./db "What is AFM?" --llm claude --top-k 8 --context
+rag ask ./db "list files"
 ```
 
 `ask` now appends a per-query `Sources` footer with filename counts when the active backend returns source metadata for retrieved chunks. If a backend cannot expose filenames for retrieval results, the footer is omitted quietly.
+
+`rag ask ... "list files"` is a built-in shortcut: it reuses the datastore source listing and prints the stored source names for the selected DB instead of running retrieval and generation.
 
 **Shorthand** — ask against `./db` without subcommands:
 
@@ -323,6 +327,86 @@ rag ask 'postgres://user:pass@localhost/ragdb' "What is AFM?" \
   --table my_docs --embed voyage --llm claude --top-k 8
 ```
 
+### Weaviate backend
+
+Weaviate is supported as a vector backend via `weaviate://...` URIs.
+
+#### Install extras
+
+```bash
+pip install -e ".[weaviate]"
+```
+
+#### OrbStack + Weaviate quickstart (macOS)
+
+1. Start OrbStack.
+2. In this repo, start Weaviate:
+
+```bash
+make weaviate
+```
+
+3. Verify container status:
+
+```bash
+docker ps --filter name=rag-weaviate
+```
+
+4. Optional readiness check:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/v1/.well-known/ready
+```
+
+Expected status: `200` (ready) or `503` (still starting).
+
+The Makefile target creates/starts a local container named `rag-weaviate` on:
+
+- HTTP: `localhost:8080`
+- gRPC: `localhost:50051`
+
+#### Step-by-step RAG workflow with Weaviate
+
+Use the Weaviate URI as your DB and keep your embedding provider consistent between ingest and ask.
+
+1. Ingest documents:
+
+```bash
+rag ingest weaviate://localhost:8080 ./docs/ --embed mistral
+```
+
+2. Confirm what was ingested:
+
+```bash
+rag list weaviate://localhost:8080
+```
+
+3. Ask questions:
+
+```bash
+rag ask weaviate://localhost:8080 "What are the responsible AI principles?" \
+  --embed mistral --llm claude --top-k 5
+```
+
+4. Optional shorthand (uses default `./db`, so not for Weaviate):
+   Use explicit `rag ask weaviate://...` for Weaviate workflows.
+
+#### Notes
+
+- Default table/collection is `embeddings`; override with `--table <name>` if needed.
+- Collection names are sanitized for Weaviate automatically.
+- For local OrbStack usage, `weaviate://localhost:8080` is the simplest URI.
+
+#### Container lifecycle
+
+```bash
+# Stop without deleting data inside the container
+docker stop rag-weaviate
+
+# Start again later
+docker start rag-weaviate
+```
+
 ## Config file
 
 Defaults can be set in `./rag.toml` or `~/.rag.toml`:
@@ -390,16 +474,29 @@ Upload files to Gemini and ask in one shot. No vector store, no separate ingest.
 
 **Requires:** `pip install -e ".[gemini]"` and `GEMINI_API_KEY`.
 
+**Supported file flow:**
+
+- `--gemini-mode auto` (default): route to File Search when Office files are present, otherwise use direct file upload.
+- `--gemini-mode direct`: force direct upload mode.
+- `--gemini-mode file-search`: force File Search mode.
+
+**Supported extensions in `rag gemini`:**
+
+- Direct-compatible: `.pdf`, `.txt`, `.md`, `.html`, `.htm`, `.csv`
+- Office (auto-routed through File Search import): `.doc`, `.docx`, `.ppt`, `.pptx`, `.xls`, `.xlsx`
+
 **Limitations:**
 
 - Files are **temporary** on Google's servers (expire after 48 hours).
 - No persistent data store — each `rag gemini` run re-uploads the files.
 - Limited by model context window (~2M tokens for Gemini 2.5).
 - Best for: quick questions over a few PDFs or docs.
+- Office files can spend time in Gemini `PROCESSING` before import/indexing completes.
 
 ```bash
 rag gemini ./docs/ "What is AFM?"
 rag gemini paper.pdf "Summarize the key findings" --model gemini-2.5-pro
+rag gemini ./docs/ "What is AFM?" --gemini-mode auto
 ```
 
 ### Vertex AI RAG Engine
@@ -581,6 +678,7 @@ Complete reference of all configurable providers, models, and strategies:
 | | `--pdf-strategy auto` | `auto` | Unstructured | — | — | `[unstructured]` |
 | **Database** | `./db` | — | LanceDB (default) | — | — | — |
 | | `postgres://...` | — | Postgres + pgvector | — | — | `[postgres]` |
+| | `weaviate://host:8080` | — | Weaviate | — | Optional (`WEAVIATE_API_KEY`) | `[weaviate]` |
 | **Gemini API** | `rag gemini` | — | Gemini File API | — | `GEMINI_API_KEY` | `[gemini]` |
 | **Vertex** | `vertex://PROJECT/CORPUS` | — | Vertex AI RAG Engine | — | GCP auth | `[vertex]` |
 | **Bedrock KB** | `bedrock-kb://KB_ID` | — | Bedrock Knowledge Bases | — | AWS credentials | `[bedrock]` |
