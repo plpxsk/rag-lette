@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import pytest
+
 from rag.db import LanceDbAdapter, QueryChunk, get_db_adapter
 
 
 def test_lancedb_adapter_round_trip_and_source_management(tmp_path) -> None:
     adapter = LanceDbAdapter(str(tmp_path / "db"), "embeddings")
     adapter.setup(embedding_dim=2)
+    adapter.record_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+        embedding_dim=2,
+    )
     adapter.add(
         [
             {"text": "alpha", "source": "a.txt", "vector": [1.0, 0.0]},
@@ -28,6 +35,26 @@ def test_lancedb_adapter_round_trip_and_source_management(tmp_path) -> None:
 
     assert not adapter.has_source("o'hara.txt")
     assert adapter.list_sources() == ["a.txt"]
+    adapter.validate_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+    )
+
+
+def test_lancedb_adapter_rejects_mismatched_embedding_config(tmp_path) -> None:
+    adapter = LanceDbAdapter(str(tmp_path / "db"), "embeddings")
+    adapter.setup(embedding_dim=2)
+    adapter.record_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+        embedding_dim=2,
+    )
+
+    with pytest.raises(RuntimeError, match="Stored embedding config"):
+        adapter.validate_embedding_config(
+            embed_provider="mistral",
+            embed_model="mistral-embed",
+        )
 
 
 def test_get_db_adapter_defaults_to_lancedb() -> None:

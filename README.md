@@ -138,7 +138,11 @@ pip install -e ".[gemini]"    # Gemini (embeddings and/or LLM)
 pip install -e ".[bedrock]"   # AWS Bedrock
 ```
 
-> Both `ingest` and `ask` must use the same embedding provider and model — the stored vectors must match the query vector dimensionality.
+> Both `ingest` and `ask` must use the same embedding provider and model.
+>
+> For **LanceDB** and **Weaviate**, `rag ingest` now records the embedding provider/model in backend metadata and `rag ask` fails fast if you request a different embedding config later.
+>
+> Older LanceDB/Weaviate datasets created before this metadata was added do not have that protection, so keep the embedding settings consistent when querying them.
 
 ## LLM providers
 
@@ -246,6 +250,16 @@ Unlike the basic method's character splitter, unstructured chunks by document st
 ## Database backends
 
 The default backend is **LanceDB**, a local vector database stored at `./db`. For shared or persistent deployments, Postgres with pgvector is also supported.
+
+### LanceDB backend
+
+LanceDB is the default vector store for local workflows.
+
+- Stores chunk text, source filename, and vectors.
+- Records embedding provider/model metadata for new ingests.
+- Validates the requested embedding config on `rag ask` for datasets created or updated with current versions of the CLI.
+
+Older LanceDB datasets without stored embedding metadata still work, but the CLI cannot validate the original embedding config for them.
 
 ### Postgres backend
 
@@ -376,6 +390,8 @@ The Makefile target creates/starts a local container named `rag-weaviate` on:
 
 Use the Weaviate URI as your DB and keep your embedding provider consistent between ingest and ask.
 
+Weaviate ingests now record embedding provider/model metadata in a companion metadata collection. `rag ask` validates that the requested embedding config matches before querying.
+
 1. Ingest documents:
 
 ```bash
@@ -403,6 +419,7 @@ rag ask weaviate://localhost:8080 "What are the responsible AI principles?" \
 
 - Default table/collection is `embeddings`; override with `--table <name>` if needed.
 - Collection names are sanitized for Weaviate automatically.
+- Older Weaviate collections created before embedding metadata was added still work, but the CLI cannot validate their original embedding config.
 - For local OrbStack usage, `weaviate://localhost:8080` is the simplest URI.
 
 #### Container lifecycle

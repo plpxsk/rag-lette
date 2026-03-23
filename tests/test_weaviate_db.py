@@ -141,7 +141,7 @@ def fake_weaviate(monkeypatch):
             Vectors=types.SimpleNamespace(self_provided=lambda: "self-provided")
         ),
         Property=lambda **kwargs: kwargs,
-        DataType=types.SimpleNamespace(TEXT="text"),
+        DataType=types.SimpleNamespace(TEXT="text", INT="int"),
     )
     classes_module.query = types.SimpleNamespace(Filter=_FakeFilter)
 
@@ -168,6 +168,11 @@ def test_weaviate_collection_name_is_sanitized() -> None:
 def test_weaviate_adapter_round_trip(fake_weaviate) -> None:
     adapter = WeaviateAdapter("weaviate://localhost:8080", "embeddings")
     adapter.setup(embedding_dim=2)
+    adapter.record_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+        embedding_dim=2,
+    )
     adapter.add(
         [
             {"text": "alpha", "source": "a.txt", "vector": [0.1, 0.2]},
@@ -187,6 +192,10 @@ def test_weaviate_adapter_round_trip(fake_weaviate) -> None:
 
     adapter.delete_source("a.txt")
     assert adapter.list_sources() == ["b.txt"]
+    adapter.validate_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+    )
 
     adapter.close()
     assert fake_weaviate[0].closed
@@ -195,3 +204,19 @@ def test_weaviate_adapter_round_trip(fake_weaviate) -> None:
 def test_weaviate_adapter_routing(fake_weaviate) -> None:
     adapter = get_db_adapter("weaviate://localhost:8080", "embeddings")
     assert isinstance(adapter, WeaviateAdapter)
+
+
+def test_weaviate_adapter_rejects_mismatched_embedding_config(fake_weaviate) -> None:
+    adapter = WeaviateAdapter("weaviate://localhost:8080", "embeddings")
+    adapter.setup(embedding_dim=2)
+    adapter.record_embedding_config(
+        embed_provider="openai",
+        embed_model="text-embedding-3-small",
+        embedding_dim=2,
+    )
+
+    with pytest.raises(RuntimeError, match="Stored embedding config"):
+        adapter.validate_embedding_config(
+            embed_provider="mistral",
+            embed_model="mistral-embed",
+        )

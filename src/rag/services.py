@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from rag.chunk import BASIC_EXTENSIONS, Chunk, chunk_file, list_chunkable_files
+from rag.chunk import BASIC_EXTENSIONS, Chunk, IgnoredPath, chunk_file, discover_chunkable_files
 from rag.config import RagConfig
 from rag.db import QueryChunk, get_db_adapter
 from rag.embed import get_embed_adapter
@@ -26,6 +26,7 @@ class IngestionResult:
     chunks: list[Chunk]
     rows_written: int
     skipped_files: list[str]
+    ignored_files: list[IgnoredPath]
     failures: list[tuple[Path, Exception]]
 
 
@@ -101,15 +102,14 @@ class IngestionService:
 
         files_to_process: list[Path] = []
         skipped_files: list[str] = []
+        ignored_files: list[IgnoredPath] = []
 
         if source_path.is_dir():
-            all_files = [
-                file_path for file_path in sorted(source_path.iterdir())
-                if file_path.is_file()
-                and not file_path.name.startswith(".")
-                and file_path.suffix.lower() in BASIC_EXTENSIONS
-                and file_path.suffix.lower() not in normalized_skip
-            ]
+            all_files, ignored_files = discover_chunkable_files(
+                source_path,
+                chunk_method="basic",
+                skip_extensions=skip_extensions,
+            )
             for file_path in all_files:
                 if db_existed and adapter.has_source(file_path.name):
                     if overwrite:
@@ -140,6 +140,7 @@ class IngestionService:
                 chunks=[],
                 rows_written=0,
                 skipped_files=skipped_files,
+                ignored_files=ignored_files,
                 failures=[],
             )
 
@@ -160,6 +161,7 @@ class IngestionService:
             chunks=[],
             rows_written=len(rows),
             skipped_files=skipped_files,
+            ignored_files=ignored_files,
             failures=[],
         )
 
@@ -174,12 +176,21 @@ class IngestionService:
         progress: ProgressCallback | None,
     ) -> IngestionResult:
         adapter = get_db_adapter(cfg.db, cfg.table)
+        adapter.validate_embedding_config(
+            embed_provider=cfg.embed_provider,
+            embed_model=cfg.embed_model,
+        )
         chunks: list[Chunk] = []
         failures: list[tuple[Path, Exception]] = []
         skipped_files: list[str] = []
+        ignored_files: list[IgnoredPath] = []
 
         if source_path.is_dir():
-            all_files = list_chunkable_files(source_path, cfg.chunk_method, skip_extensions)
+            all_files, ignored_files = discover_chunkable_files(
+                source_path,
+                cfg.chunk_method,
+                skip_extensions,
+            )
             files_to_process: list[Path] = []
             to_overwrite: set[str] = set()
             for file_path in all_files:
@@ -199,6 +210,7 @@ class IngestionService:
                     chunks=[],
                     rows_written=0,
                     skipped_files=skipped_files,
+                    ignored_files=ignored_files,
                     failures=[],
                 )
 
@@ -229,6 +241,7 @@ class IngestionService:
                     chunks=[],
                     rows_written=0,
                     skipped_files=skipped_files,
+                    ignored_files=[],
                     failures=[],
                 )
 
@@ -264,6 +277,11 @@ class IngestionService:
 
         self._emit(progress, "start", "writing")
         adapter.setup(embedding_dim=embedder.dim)
+        adapter.record_embedding_config(
+            embed_provider=cfg.embed_provider,
+            embed_model=cfg.embed_model,
+            embedding_dim=embedder.dim,
+        )
         rows = [
             {"vector": vector, "text": chunk.text, "source": chunk.source}
             for chunk, vector in zip(chunks, vectors)
@@ -277,6 +295,7 @@ class IngestionService:
             chunks=chunks,
             rows_written=len(rows),
             skipped_files=skipped_files,
+            ignored_files=ignored_files,
             failures=failures,
         )
 
@@ -312,6 +331,10 @@ class QueryService:
             self._emit(progress, "end", "searching")
             return result
 
+        adapter.validate_embedding_config(
+            embed_provider=cfg.embed_provider,
+            embed_model=cfg.embed_model,
+        )
         embedder = get_embed_adapter(cfg.embed_provider, cfg.embed_model)
         question_vector = embedder.embed([question])[0]
         result = RetrievalResult(adapter.query_chunks(query_vector=question_vector, k=cfg.top_k))

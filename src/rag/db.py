@@ -65,6 +65,18 @@ class DbAdapter(ABC):
         (e.g. Postgres) override this.
         """
 
+    def record_embedding_config(
+        self,
+        *,
+        embed_provider: str,
+        embed_model: str,
+        embedding_dim: int,
+    ) -> None:
+        """Persist collection-level embedding metadata when the backend supports it."""
+
+    def validate_embedding_config(self, *, embed_provider: str, embed_model: str) -> None:
+        """Fail fast when stored embedding metadata conflicts with the requested config."""
+
     def query_chunks(self, *, query_vector: Sequence[float], k: int) -> list[QueryChunk]:
         """Return query results with optional source metadata when available."""
         return [QueryChunk(text=text) for text in self.query(query_vector=query_vector, k=k)]
@@ -90,6 +102,7 @@ class LanceDbAdapter(DbAdapter):
         self.uri = uri
         self.table_name = table_name
         self._db: Any = None
+        self._metadata_table_name = "__raglette_metadata__"
 
     def _connect(self) -> Any:
         if self._db is None:
@@ -115,6 +128,57 @@ class LanceDbAdapter(DbAdapter):
 
     def setup(self, *, embedding_dim: int) -> None:
         self._connect()
+
+    def _metadata_rows(self) -> list[dict[str, Any]]:
+        if self._metadata_table_name not in self._table_names():
+            return []
+        table = self._connect().open_table(self._metadata_table_name)
+        safe = self.table_name.replace("'", "''")
+        return table.search().where(f"table_name = '{safe}'").limit(1).to_list()
+
+    def _stored_embedding_config(self) -> tuple[str, str] | None:
+        rows = self._metadata_rows()
+        if not rows:
+            return None
+        row = rows[0]
+        provider = row.get("embed_provider")
+        model = row.get("embed_model")
+        if provider and model:
+            return str(provider), str(model)
+        return None
+
+    def record_embedding_config(
+        self,
+        *,
+        embed_provider: str,
+        embed_model: str,
+        embedding_dim: int,
+    ) -> None:
+        db = self._connect()
+        row = {
+            "table_name": self.table_name,
+            "embed_provider": embed_provider,
+            "embed_model": embed_model,
+            "embedding_dim": embedding_dim,
+        }
+        if self._metadata_table_name in self._table_names():
+            table = db.open_table(self._metadata_table_name)
+            safe = self.table_name.replace("'", "''")
+            table.delete(f"table_name = '{safe}'")
+            table.add([row])
+        else:
+            db.create_table(self._metadata_table_name, data=[row])
+
+    def validate_embedding_config(self, *, embed_provider: str, embed_model: str) -> None:
+        stored = self._stored_embedding_config()
+        if stored is None:
+            return
+        if stored != (embed_provider, embed_model):
+            raise RuntimeError(
+                "Stored embedding config "
+                f"{stored[0]}/{stored[1]} doesn't match requested "
+                f"{embed_provider}/{embed_model}."
+            )
 
     def add(self, rows: Sequence[dict[str, Any]]) -> None:
         db = self._connect()
@@ -786,6 +850,7 @@ class WeaviateAdapter(DbAdapter):
         self.uri = uri
         self.table_name = table_name
         self.collection_name = _weaviate_collection_name(table_name)
+        self.metadata_collection_name = "RagMetadata"
         self._conn = _weaviate_parse_uri(uri)
         self._client: Any = None
 
@@ -845,9 +910,14 @@ class WeaviateAdapter(DbAdapter):
         client = self._connect()
         return client.collections.use(self.collection_name)
 
+    def _metadata_collection(self) -> Any:
+        client = self._connect()
+        return client.collections.use(self.metadata_collection_name)
+
     def setup(self, *, embedding_dim: int) -> None:
         client = self._connect()
         if client.collections.exists(self.collection_name):
+            self._ensure_metadata_collection()
             return
         client.collections.create(
             self.collection_name,
@@ -863,6 +933,86 @@ class WeaviateAdapter(DbAdapter):
                 ),
             ],
         )
+        self._ensure_metadata_collection()
+
+    def _ensure_metadata_collection(self) -> None:
+        client = self._connect()
+        if client.collections.exists(self.metadata_collection_name):
+            return
+        client.collections.create(
+            self.metadata_collection_name,
+            vector_config=self._wvc.config.Configure.Vectors.self_provided(),
+            properties=[
+                self._wvc.config.Property(
+                    name="collection",
+                    data_type=self._wvc.config.DataType.TEXT,
+                ),
+                self._wvc.config.Property(
+                    name="embed_provider",
+                    data_type=self._wvc.config.DataType.TEXT,
+                ),
+                self._wvc.config.Property(
+                    name="embed_model",
+                    data_type=self._wvc.config.DataType.TEXT,
+                ),
+                self._wvc.config.Property(
+                    name="embedding_dim",
+                    data_type=self._wvc.config.DataType.INT,
+                ),
+            ],
+        )
+
+    def _stored_embedding_config(self) -> tuple[str, str] | None:
+        if not self._connect().collections.exists(self.metadata_collection_name):
+            return None
+        response = self._metadata_collection().query.fetch_objects(
+            filters=self._wvc.query.Filter.by_property("collection").equal(self.collection_name),
+            limit=1,
+            return_properties=["embed_provider", "embed_model"],
+        )
+        if not response.objects:
+            return None
+        props = response.objects[0].properties
+        if not isinstance(props, dict):
+            return None
+        provider = props.get("embed_provider")
+        model = props.get("embed_model")
+        if provider and model:
+            return str(provider), str(model)
+        return None
+
+    def record_embedding_config(
+        self,
+        *,
+        embed_provider: str,
+        embed_model: str,
+        embedding_dim: int,
+    ) -> None:
+        self._ensure_metadata_collection()
+        self._metadata_collection().data.delete_many(
+            where=self._wvc.query.Filter.by_property("collection").equal(self.collection_name)
+        )
+        with self._metadata_collection().batch.fixed_size(batch_size=1) as batch:
+            batch.add_object(
+                properties={
+                    "collection": self.collection_name,
+                    "embed_provider": embed_provider,
+                    "embed_model": embed_model,
+                    "embedding_dim": embedding_dim,
+                },
+                vector=[0.0],
+            )
+
+    def validate_embedding_config(self, *, embed_provider: str, embed_model: str) -> None:
+        stored = self._stored_embedding_config()
+        if stored is None:
+            return
+        if stored != (embed_provider, embed_model):
+            raise RuntimeError(
+                "Stored embedding config "
+                f"{stored[0]}/{stored[1]} doesn't match requested "
+                f"{embed_provider}/{embed_model}."
+            )
 
     def add(self, rows: Sequence[dict[str, Any]]) -> None:
         if not rows:

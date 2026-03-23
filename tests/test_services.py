@@ -17,6 +17,8 @@ class StubVectorAdapter:
         self.added_rows: list[dict] = []
         self.deleted_sources: list[str] = []
         self.embedding_dims: list[int] = []
+        self.recorded_embedding_configs: list[tuple[str, str, int]] = []
+        self.validated_embedding_configs: list[tuple[str, str]] = []
         self.preflight_called = False
 
     def preflight(self) -> None:
@@ -34,6 +36,18 @@ class StubVectorAdapter:
 
     def setup(self, *, embedding_dim: int) -> None:
         self.embedding_dims.append(embedding_dim)
+
+    def record_embedding_config(
+        self,
+        *,
+        embed_provider: str,
+        embed_model: str,
+        embedding_dim: int,
+    ) -> None:
+        self.recorded_embedding_configs.append((embed_provider, embed_model, embedding_dim))
+
+    def validate_embedding_config(self, *, embed_provider: str, embed_model: str) -> None:
+        self.validated_embedding_configs.append((embed_provider, embed_model))
 
     def add(self, rows: list[dict]) -> None:
         self.added_rows.extend(rows)
@@ -100,6 +114,19 @@ def test_query_service_uses_vector_search_when_needed(monkeypatch) -> None:
     result = QueryService().retrieve(cfg, "What is AFM?")
     assert result.texts == ["vector-result"]
     assert result.source_counts == [("doc.txt", 1)]
+    assert result.chunks[0].source == "doc.txt"
+
+
+def test_query_service_validates_vector_backend_embedding_config(monkeypatch) -> None:
+    cfg = RagConfig(top_k=3, embed_provider="openai", embed_model="text-embedding-3-small")
+    adapter = StubVectorAdapter()
+
+    monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
+    monkeypatch.setattr("rag.services.get_embed_adapter", lambda provider, model: StubEmbedder())
+
+    QueryService().retrieve(cfg, "What is AFM?")
+
+    assert adapter.validated_embedding_configs == [("openai", "text-embedding-3-small")]
 
 
 def test_query_service_raises_when_db_missing(monkeypatch) -> None:
@@ -143,6 +170,7 @@ def test_ingestion_service_single_file_emits_progress_and_writes(
     assert result.rows_written == 2
     assert len(adapter.added_rows) == 2
     assert adapter.embedding_dims == [2]
+    assert adapter.recorded_embedding_configs == [("mistral", "mistral-embed", 2)]
     assert {row["source"] for row in adapter.added_rows} == {"doc.txt"}
     assert events == [
         ("start", "chunking"),
@@ -240,7 +268,10 @@ def test_ingestion_service_collects_directory_failures(monkeypatch, tmp_path: Pa
 
     adapter = StubVectorAdapter()
     monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
-    monkeypatch.setattr("rag.services.list_chunkable_files", lambda *args, **kwargs: [file_ok, file_bad])
+    monkeypatch.setattr(
+        "rag.services.discover_chunkable_files",
+        lambda *args, **kwargs: ([file_ok, file_bad], []),
+    )
 
     def fake_chunk(path: Path, **kwargs) -> list[Chunk]:
         if path.name == "bad.txt":
@@ -269,7 +300,10 @@ def test_ingestion_service_directory_overwrite_deletes_only_successfully_chunked
     adapter = StubVectorAdapter(existing_sources={"ok.txt", "bad.txt"})
 
     monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
-    monkeypatch.setattr("rag.services.list_chunkable_files", lambda *args, **kwargs: [file_ok, file_bad])
+    monkeypatch.setattr(
+        "rag.services.discover_chunkable_files",
+        lambda *args, **kwargs: ([file_ok, file_bad], []),
+    )
 
     def fake_chunk(path: Path, **kwargs) -> list[Chunk]:
         if path.name == "bad.txt":
@@ -313,6 +347,62 @@ def test_ingestion_service_raises_on_embedding_count_mismatch(
         IngestionService().ingest(cfg, source_file, skip_extensions=set(), overwrite=False)
 
     assert adapter.added_rows == []
+
+
+@pytest.mark.parametrize("db_uri", ["./db", "weaviate://localhost:8080"])
+def test_ingestion_service_ingests_unstructured_directory_for_vector_backends(
+    monkeypatch, tmp_path: Path, db_uri: str
+) -> None:
+    cfg = RagConfig(db=db_uri, chunk_method="unstructured")
+    adapter = StubVectorAdapter()
+    for name in ["a.pdf", "b.docx", "c.pptx", "d.xlsx", "e.md", "f.txt", ".hidden.docx"]:
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
+    monkeypatch.setattr(
+        "rag.services.chunk_file",
+        lambda path, **kwargs: [Chunk(text=f"chunk:{path.name}", source=path.name)],
+    )
+    monkeypatch.setattr("rag.services.get_embed_adapter", lambda provider, model: StubEmbedder())
+
+    result = IngestionService().ingest(cfg, tmp_path, skip_extensions=set(), overwrite=False)
+
+    assert result.rows_written == 6
+    assert result.failures == []
+    assert {row["source"] for row in adapter.added_rows} == {
+        "a.pdf",
+        "b.docx",
+        "c.pptx",
+        "d.xlsx",
+        "e.md",
+        "f.txt",
+    }
+    assert all(row["source"] != ".hidden.docx" for row in adapter.added_rows)
+
+
+def test_ingestion_service_reports_ignored_hidden_and_unsupported_files(
+    monkeypatch, tmp_path: Path
+) -> None:
+    cfg = RagConfig()
+    (tmp_path / "ok.txt").write_text("ok", encoding="utf-8")
+    (tmp_path / "slides.pptx").write_text("slides", encoding="utf-8")
+    (tmp_path / ".hidden.txt").write_text("hidden", encoding="utf-8")
+
+    adapter = StubVectorAdapter()
+    monkeypatch.setattr("rag.services.get_db_adapter", lambda uri, table: adapter)
+    monkeypatch.setattr(
+        "rag.services.chunk_file",
+        lambda path, **kwargs: [Chunk(text=f"chunk:{path.name}", source=path.name)],
+    )
+    monkeypatch.setattr("rag.services.get_embed_adapter", lambda provider, model: StubEmbedder())
+
+    result = IngestionService().ingest(cfg, tmp_path, skip_extensions=set(), overwrite=False)
+
+    assert result.rows_written == 1
+    assert [(ignored.path.name, ignored.reason) for ignored in result.ignored_files] == [
+        (".hidden.txt", "hidden file"),
+        ("slides.pptx", "unsupported file type (.pptx)"),
+    ]
 
 
 def test_ingestion_service_bedrock_kb_emits_upload_and_indexing_progress(
